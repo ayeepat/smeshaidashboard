@@ -4,9 +4,9 @@
 'use strict';
 
 const API_BASE = 'https://smesh-licenses.smeshai.workers.dev';
-// AI spend is billed in USD; revenue is in RUB. To chart them together we
-// convert cost at a fixed rate (shown in the UI so the number is never a lie).
-const USD_RUB = 95;
+// AI spend is billed in USD; revenue is in RUB. The USD→RUB rate is fetched
+// LIVE from exchangerate-api.com via the worker (the API key stays a server
+// secret) — never a hardcoded guess. See loadRate() / fxRate().
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -58,6 +58,40 @@ function tokens(v) {
   return int(v);
 }
 const pct = (v) => (v == null ? '—' : (v * 100).toFixed(v < 0.1 ? 1 : 0) + '%');
+
+/* ---- live USD→RUB + honesty flags ---- */
+// The live rate lives in state.rate (fetched from the worker). fxRate() is the
+// number or null when the rate is genuinely unavailable — displays then say so
+// instead of inventing a conversion.
+const fxRate = () => (state.rate && state.rate.ok && state.rate.rate > 0 ? state.rate.rate : null);
+const usd2rub = (v) => { const r = fxRate(); return r == null ? null : (Number(v) || 0) * r; };
+// Formatted ₽ equivalent of a $ amount, or null if no live rate. Adaptive
+// precision so tiny per-request costs don't collapse to a useless "0 ₽".
+function rubEq(usdVal) {
+  const r = usd2rub(usdVal);
+  if (r == null) return null;
+  if (r >= 100) return int(r) + ' ₽';
+  if (r >= 1) return r.toFixed(1) + ' ₽';
+  return r.toFixed(2) + ' ₽';
+}
+// A $ amount with its live ₽ equivalent beside it — used everywhere a dollar
+// figure appears, per the "every $ shows ₽" requirement.
+function usdDual(v) {
+  const r = rubEq(v);
+  return `${usd(v)} <span class="rub-eq${r == null ? ' unv' : ''}">${r == null ? '₽ —' : '≈ ' + r}</span>`;
+}
+
+// Token & cost figures come from the AI provider's usage frame. The pipeline is
+// proven the moment ANY real usage is recorded (nonzero tokens can only come
+// from a captured live frame), so the flag auto-clears — see state.captured.
+const CAPTURE_MSG = 'Токены и стоимость берутся из ответа ИИ-провайдера. ' +
+  'Логика проверена по документации, но пока НЕ подтверждена живым запросом. ' +
+  'Сделайте один запрос или тест через расширение — если здесь появятся токены/расход больше нуля, значит захват работает и метка исчезнет.';
+const unvBadge = (msg = CAPTURE_MSG) => ` <span class="badge unverified" title="${esc(msg)}">unverified!</span>`;
+// Badge shown on cost/token stats until real usage confirms the capture.
+const costFlag = () => (state.captured ? '' : unvBadge());
+// A muted "projection" tag for extrapolated (not measured) numbers.
+const projTag = ' <span class="proj-tag" title="Проекция: рассчитано из имеющихся данных, не измерено напрямую">проекция</span>';
 
 function fmtDate(ms) {
   if (!ms) return '—';
@@ -227,8 +261,46 @@ const state = {
   view: 'overview',
   range: { overview: 7, users: 30, money: 30, subjects: 30, retention: 0, errors: 30 },
   users: { sort: 'cost', browser: '', license: '', q: '', offset: 0, limit: 50 },
-  loaded: {}
+  loaded: {},
+  rate: { ok: false, rate: null, fetched_at: null, stale: true }, // live USD→RUB
+  captured: false // has any real token/cost usage been recorded yet?
 };
+
+// Fetch the live USD→RUB rate (worker-proxied; key stays server-side) and paint
+// the always-visible sidebar chip.
+async function loadRate() {
+  try { state.rate = await api('/admin/stats/rate'); }
+  catch { state.rate = { ok: false, rate: null, fetched_at: null, stale: true }; }
+  renderRateChip();
+}
+function renderRateChip() {
+  const el = $('#rateChip'); if (!el) return;
+  if (!state.rate.ok || !state.rate.rate) {
+    el.innerHTML = `<span class="badge unverified" title="Не удалось получить курс USD→RUB">курс $→₽ unverified!</span>`;
+    return;
+  }
+  const stale = !!state.rate.stale;
+  el.innerHTML = `1&nbsp;$ = <b>${state.rate.rate.toFixed(2)}&nbsp;₽</b> <span class="rate-src${stale ? ' stale' : ''}">${stale ? 'кэш' : 'live'}</span>`;
+  el.title = 'Курс exchangerate-api · обновлён ' + fmtDateTime(Date.parse(state.rate.fetched_at));
+}
+// "Is the token/cost capture proven?" — true once any real usage exists all-time.
+async function loadCaptured() {
+  try {
+    const ov = await api('/admin/stats/overview?days=0');
+    state.captured = (Number(ov.usage.tokens_in) + Number(ov.usage.tokens_out)) > 0;
+  } catch { state.captured = false; }
+}
+// Plain-language honesty banner: what's real vs. what still needs confirming.
+function renderOverviewBanner() {
+  const el = $('#ovBanner'); if (!el) return;
+  const notes = [];
+  if (!state.captured) notes.push('<b>Токены и расход на ИИ</b> помечены «unverified!» — они берутся из ответа провайдера, но пока не подтверждены живым запросом. Сделайте один solve или тест через расширение: как только здесь появятся ненулевые токены, метки исчезнут сами.');
+  if (!fxRate()) notes.push('<b>Курс USD→RUB недоступен</b> — рублёвые эквиваленты показаны как «₽ —».');
+  if (!notes.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = '';
+  el.innerHTML = `<div class="banner-title">Не подтверждено:</div>` + notes.map((n) => `<div class="banner-line">${n}</div>`).join('') +
+    `<div class="banner-real">Реальные и проверенные: выручка, покупки, устройства, браузеры, счётчики решений/тестов/ГДЗ, активность (DAU/WAU/MAU), предметы.</div>`;
+}
 
 /* ---------- Overview ---------- */
 async function loadOverview() {
@@ -239,28 +311,30 @@ async function loadOverview() {
   try { [data, ts] = await Promise.all([api(`/admin/stats/overview?days=${days}`), api(`/admin/stats/timeseries?days=${days > 0 ? days : 30}`)]); }
   catch (e) { $('#ovKpis').innerHTML = errBox(e); return; }
 
+  renderOverviewBanner();
   const u = data.usage, c = data.cost, r = data.revenue, rp = data.revenue_prev, up = data.usage_prev, d = data.devices;
-  const costRub = c.window_usd * USD_RUB;
-  const net = r.revenue_rub - costRub;
+  const costRub = usd2rub(c.window_usd);
+  const net = costRub == null ? null : (r.revenue_rub - costRub);
   renderKpis($('#ovKpis'), [
-    { label: 'Выручка', value: rub(r.revenue_rub), accent: true, foot: `${int(r.paid)} оплат · ${deltaChip(r.revenue_rub, rp ? rp.revenue_rub : null)}`, icon: iconMoney() },
-    { label: 'Расход на ИИ', value: usd(c.window_usd), sub: '≈ ' + rub(costRub), foot: deltaChip(c.window_usd, c.prev_usd, 'up_bad') || 'кредиты API', icon: iconChip() },
-    { label: 'Чистыми', value: rub(net), foot: net >= 0 ? 'выручка − расход' : 'пока в минусе', accent: net > 0 },
+    { label: 'Выручка', value: rub(r.revenue_rub), accent: r.revenue_rub > 0, foot: `${int(r.paid)} оплат · ${deltaChip(r.revenue_rub, rp ? rp.revenue_rub : null) || 'реальные платежи'}`, icon: iconMoney() },
+    { label: 'Расход на ИИ', value: usd(c.window_usd), sub: rubEq(c.window_usd) == null ? '' : '≈ ' + rubEq(c.window_usd), foot: (deltaChip(c.window_usd, c.prev_usd, 'up_bad') || 'кредиты API') + costFlag(), icon: iconChip() },
+    { label: 'Чистыми', value: net == null ? '—' : rub(net), foot: net == null ? 'нужен курс $→₽' : (net >= 0 ? 'выручка − расход' : 'пока в минусе'), accent: net != null && net > 0 },
     { label: 'Средний чек', value: r.avg_check_rub ? rub(r.avg_check_rub) : '—', foot: `${int(r.subscriptions)} подписок · ${int(r.lifetimes)} навсегда` },
     { label: 'Активные (MAU)', value: int(d.mau), foot: `DAU ${int(d.dau)} · WAU ${int(d.wau)}`, icon: iconUsers() },
     { label: 'Всего устройств', value: int(d.total), foot: `+${int(d.new_in_window)} за период` },
-    { label: 'Решений', value: int(u.solves), foot: `${deltaChip(u.solves, up ? up.solves : null)} · ${int(u.tests)} тестов · ${int(u.gdz)} ГДЗ` },
-    { label: 'Расход на юзера', value: usd(c.per_active_user_usd), foot: `в день ${usd(c.per_user_day_usd)} · мес ${usd(c.per_user_month_usd)}` }
+    { label: 'Решений', value: int(u.solves), foot: `${deltaChip(u.solves, up ? up.solves : null) || 'за период'} · ${int(u.tests)} тестов · ${int(u.gdz)} ГДЗ` },
+    { label: 'Расход на юзера', value: usd(c.per_active_user_usd), sub: rubEq(c.per_active_user_usd) == null ? '' : '≈ ' + rubEq(c.per_active_user_usd), foot: `в день ${usd(c.per_user_day_usd)} · мес ${usd(c.per_user_month_usd)}${projTag}${costFlag()}` }
   ]);
 
   const rows = ts.rows;
   const labels = rows.map((x) => x.day);
-  $('#ovMoneyNote').textContent = `$1 ≈ ${USD_RUB} ₽`;
+  const rate = fxRate();
+  $('#ovMoneyNote').innerHTML = rate ? `1 $ = ${rate.toFixed(2)} ₽${costFlag()}` : `<span class="badge unverified">курс $→₽ unverified!</span>`;
   lineChart($('#ovMoneyChart'), {
     labels,
     series: [
       { color: 'var(--green)', values: rows.map((x) => x.revenue_rub) },
-      { color: 'var(--warn)', values: rows.map((x) => x.cost_usd * USD_RUB) }
+      { color: 'var(--warn)', values: rows.map((x) => (Number(x.cost_usd) || 0) * (rate || 0)) }
     ],
     fmt: (v) => v >= 1000 ? (v / 1000).toFixed(0) + 'k' : int(v)
   });
@@ -300,8 +374,8 @@ async function loadUsers() {
     renderKpis($('#usersKpis'), [
       { label: 'Активных за период', value: int(ov.usage.active_devices), icon: iconUsers() },
       { label: 'Платных устройств', value: int((ov.devices.license_types.find((l) => l.type === 'subscription')?.n || 0) + (ov.devices.license_types.find((l) => l.type === 'lifetime')?.n || 0)) },
-      { label: 'Расход на всех', value: usd(ov.usage.cost_usd), sub: '≈ ' + rub(ov.usage.cost_usd * USD_RUB), accent: true },
-      { label: 'Средний расход/юзера', value: usd(ov.cost.per_active_user_usd) }
+      { label: 'Расход на всех', value: usd(ov.usage.cost_usd), sub: rubEq(ov.usage.cost_usd) == null ? '' : '≈ ' + rubEq(ov.usage.cost_usd), foot: 'кредиты API' + costFlag() },
+      { label: 'Средний расход/юзера', value: usd(ov.cost.per_active_user_usd), sub: rubEq(ov.cost.per_active_user_usd) == null ? '' : '≈ ' + rubEq(ov.cost.per_active_user_usd), foot: costFlag() }
     ]);
   } catch { /* KPIs are best-effort */ }
 
@@ -324,7 +398,7 @@ async function loadUsers() {
         <td class="num">${int(x.pdf)}</td>
         <td class="num">${tokens(x.tokens)}</td>
         <td class="num">${int(x.active_days)}</td>
-        <td class="num spent">${usd(x.cost_usd)}</td>
+        <td class="num"><div class="spent">${usd(x.cost_usd)}</div>${(() => { const rr = rubEq(x.cost_usd); return rr == null ? '' : `<div class="rub-eq">${rr}</div>`; })()}</td>
         <td class="muted">${timeAgo(x.last_seen)}</td>
       </tr>`;
     }).join('');
@@ -393,6 +467,7 @@ async function loadSubjects() {
   let data;
   try { data = await api(`/admin/stats/subjects?days=${days}`); }
   catch (e) { bars.innerHTML = errBox(e); return; }
+  const dt = $('#subjDetailTitle'); if (dt) dt.innerHTML = 'Детально' + costFlag();
   const subs = data.subjects;
   if (!subs.length) { bars.innerHTML = emptyChart(); $('#subjectsBody').innerHTML = `<tr class="loading-row"><td colspan="6">Пока нет данных.</td></tr>`; return; }
   const max = Math.max(...subs.map((s) => s.n));
@@ -408,7 +483,7 @@ async function loadSubjects() {
     <td class="num">${int(s.solves)}</td>
     <td class="num">${int(s.gdz)}</td>
     <td class="num">${int(s.devices)}</td>
-    <td class="num spent">${usd(s.cost_usd)}</td>
+    <td class="num"><div class="spent">${usd(s.cost_usd)}</div>${(() => { const rr = rubEq(s.cost_usd); return rr == null ? '' : `<div class="rub-eq">${rr}</div>`; })()}</td>
   </tr>`).join('');
 }
 
@@ -486,7 +561,7 @@ async function openUser(deviceId) {
   bodyEl.innerHTML = `
     <div class="mini-kpis">
       <div class="mini-kpi"><div class="l">Использований</div><div class="v">${int(lt.uses)}</div></div>
-      <div class="mini-kpi"><div class="l">Расход $</div><div class="v">${usd(lt.cost_usd)}</div></div>
+      <div class="mini-kpi"><div class="l">Расход${costFlag()}</div><div class="v">${usd(lt.cost_usd)}</div>${(() => { const rr = rubEq(lt.cost_usd); return rr == null ? '' : `<div class="rub-eq">${rr}</div>`; })()}</div>
       <div class="mini-kpi"><div class="l">Дней активн.</div><div class="v">${int(lt.active_days)}</div></div>
     </div>
     <dl class="kv">
@@ -503,7 +578,7 @@ async function openUser(deviceId) {
     ${daily.length ? `<div><div class="panel-sub" style="margin-bottom:6px">Использования по дням (60 дн)</div><div class="chart" id="drawerChart"></div></div>` : ''}
     ${data.subjects.length ? `<div><div class="panel-sub" style="margin-bottom:6px">Предметы</div>${propBars(data.subjects.map((s) => ({ label: esc(s.subject), value: s.n })))}</div>` : ''}
     <div><div class="panel-sub" style="margin-bottom:6px">Последние события (${data.recent.length})</div><div class="ev-list">${
-      data.recent.map((ev) => `<div class="ev-row"><div><span class="ev-type">${esc(EV_LABEL[ev.type] || ev.type)}</span>${ev.subject ? ' · ' + esc(ev.subject) : ''}${ev.cost_usd ? ' · ' + usd(ev.cost_usd) : ''}</div><div class="ev-when">${fmtDateTime(ev.ts)}</div></div>`).join('')
+      data.recent.map((ev) => `<div class="ev-row"><div><span class="ev-type">${esc(EV_LABEL[ev.type] || ev.type)}</span>${ev.subject ? ' · ' + esc(ev.subject) : ''}${ev.cost_usd ? ' · ' + usd(ev.cost_usd) + (rubEq(ev.cost_usd) ? ' / ' + rubEq(ev.cost_usd) : '') : ''}</div><div class="ev-when">${fmtDateTime(ev.ts)}</div></div>`).join('')
     }</div></div>`;
   if (daily.length) lineChart($('#drawerChart'), { labels: dailyLabels, series: [{ color: 'var(--accent)', values: daily.map((x) => x.uses) }] });
 }
@@ -574,9 +649,11 @@ function bindChrome() {
   $('#logoutBtn').addEventListener('click', logout);
 }
 
-function enterApp() {
+async function enterApp() {
   $('#gate').style.display = 'none';
   $('#shell').hidden = false;
+  // Live rate + capture-status first so the very first render is honest.
+  await Promise.all([loadRate(), loadCaptured()]);
   showView('overview', true);
 }
 function logout() { clearToken(); $('#shell').hidden = true; $('#gate').style.display = 'grid'; $('#tokenInput').value = ''; }
