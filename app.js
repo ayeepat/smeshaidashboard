@@ -1,0 +1,608 @@
+/* СМЭШ AI admin dashboard — data + rendering. Static, no build, no deps.
+   Talks to the license worker's /admin/stats/* endpoints with an admin token. */
+
+'use strict';
+
+const API_BASE = 'https://smesh-licenses.smeshai.workers.dev';
+// AI spend is billed in USD; revenue is in RUB. To chart them together we
+// convert cost at a fixed rate (shown in the UI so the number is never a lie).
+const USD_RUB = 95;
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+
+/* ------------------------------- auth -------------------------------- */
+
+const TOKEN_KEY = 'smesh_admin_token';
+let token = localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || '';
+
+function saveToken(t, remember) {
+  token = t;
+  (remember ? localStorage : sessionStorage).setItem(TOKEN_KEY, t);
+}
+function clearToken() {
+  token = '';
+  localStorage.removeItem(TOKEN_KEY);
+  sessionStorage.removeItem(TOKEN_KEY);
+}
+
+async function api(path) {
+  const res = await fetch(API_BASE + path, { headers: { 'x-admin-token': token } });
+  if (res.status === 401) { logout(); throw new Error('unauthorized'); }
+  const data = await res.json().catch(() => ({ ok: false, reason: 'bad_json' }));
+  if (!res.ok || data.ok === false) throw new Error(data.reason || ('http_' + res.status));
+  return data;
+}
+async function apiPost(path) {
+  const res = await fetch(API_BASE + path, { method: 'POST', headers: { 'x-admin-token': token } });
+  if (res.status === 401) { logout(); throw new Error('unauthorized'); }
+  return res.json().catch(() => ({ ok: false }));
+}
+
+/* ---------------------------- formatting ----------------------------- */
+
+const nf = new Intl.NumberFormat('ru-RU');
+const int = (v) => nf.format(Math.round(Number(v) || 0));
+const rub = (v) => int(v) + ' ₽';
+function usd(v) {
+  v = Number(v) || 0;
+  if (v === 0) return '$0';
+  if (v < 0.1) return '$' + v.toFixed(4);
+  if (v < 10) return '$' + v.toFixed(3);
+  return '$' + v.toFixed(2);
+}
+function tokens(v) {
+  v = Number(v) || 0;
+  if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M';
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + 'k';
+  return int(v);
+}
+const pct = (v) => (v == null ? '—' : (v * 100).toFixed(v < 0.1 ? 1 : 0) + '%');
+
+function fmtDate(ms) {
+  if (!ms) return '—';
+  return new Date(Number(ms)).toLocaleDateString('ru-RU', { day: '2-digit', month: 'short', year: '2-digit' });
+}
+function fmtDateTime(ms) {
+  if (!ms) return '—';
+  return new Date(Number(ms)).toLocaleString('ru-RU', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+function timeAgo(ms) {
+  const s = Math.floor((Date.now() - Number(ms)) / 1000);
+  if (s < 60) return 'только что';
+  const m = Math.floor(s / 60); if (m < 60) return m + ' мин назад';
+  const h = Math.floor(m / 60); if (h < 24) return h + ' ч назад';
+  const d = Math.floor(h / 24); if (d < 30) return d + ' дн назад';
+  return fmtDate(ms);
+}
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+const BROWSER_LABEL = { chrome: 'Chrome', yandex: 'Yandex', opera: 'Opera', edge: 'Edge', firefox: 'Firefox', other: 'Другой' };
+const LICENSE_LABEL = { subscription: 'Подписка', lifetime: 'Навсегда', none: 'Нет', paid: 'Платная' };
+
+/* ---------------------------- delta chip ----------------------------- */
+// Percentage change vs the previous equal-length window. dir='up_good' means a
+// rise is coloured green (revenue); 'up_bad' means a rise is red (errors/cost).
+function deltaChip(cur, prev, dir = 'up_good') {
+  if (prev == null || prev === 0) return cur > 0 ? '<span class="delta flat">нов.</span>' : '';
+  const change = (cur - prev) / prev;
+  if (Math.abs(change) < 0.005) return '<span class="delta flat">= 0%</span>';
+  const up = change > 0;
+  const good = dir === 'up_good' ? up : !up;
+  const arrow = up ? '↑' : '↓';
+  return `<span class="delta ${good ? 'up' : 'down'}">${arrow} ${Math.abs(change * 100).toFixed(0)}%</span>`;
+}
+
+/* ------------------------------- KPIs -------------------------------- */
+function kpi({ label, value, sub, foot, accent, icon }) {
+  return `<div class="kpi${accent ? ' accent' : ''}">
+    <div class="kpi-label">${icon || ''}${esc(label)}</div>
+    <div class="kpi-value">${value}${sub ? ` <small>${sub}</small>` : ''}</div>
+    ${foot ? `<div class="kpi-foot">${foot}</div>` : ''}
+  </div>`;
+}
+function renderKpis(el, items) { el.innerHTML = items.map(kpi).join(''); }
+
+/* ------------------------------ charts ------------------------------- */
+// Compact hand-rolled SVG. Internal coordinate box scales to container width
+// via viewBox; colours come from CSS custom properties so themes just work.
+const CW = 680, CH = 230, PAD = { t: 14, r: 12, b: 26, l: 44 };
+
+function niceMax(v) {
+  if (v <= 0) return 1;
+  const pow = Math.pow(10, Math.floor(Math.log10(v)));
+  const n = v / pow;
+  const step = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
+  return step * pow;
+}
+// Number of horizontal gridlines. Small integer maxes get integer steps so the
+// axis never shows fractional-rounded duplicates (e.g. 1,1,1,0,0 for a max of 1).
+const tickCount = (max) => (Number.isInteger(max) && max <= 5 ? max : 4);
+function xLabels(labels) {
+  const n = labels.length;
+  if (n <= 1) return labels.map((l, i) => ({ i, l }));
+  const want = Math.min(7, n);
+  const stride = Math.max(1, Math.round((n - 1) / (want - 1)));
+  const out = [];
+  for (let i = 0; i < n; i += stride) out.push({ i, l: labels[i] });
+  if (out[out.length - 1].i !== n - 1) out.push({ i: n - 1, l: labels[n - 1] });
+  return out;
+}
+const dayLabel = (d) => { const p = String(d).split('-'); return p.length === 3 ? `${p[2]}.${p[1]}` : d; };
+
+// Multi-series line/area chart. series: [{color, values, fill?}]. fmt(value).
+function lineChart(el, { labels, series, fmt = int }) {
+  if (!labels.length) { el.innerHTML = emptyChart(); return; }
+  const iw = CW - PAD.l - PAD.r, ih = CH - PAD.t - PAD.b;
+  let max = 0;
+  for (const s of series) for (const v of s.values) max = Math.max(max, Number(v) || 0);
+  max = niceMax(max);
+  const X = (i) => PAD.l + (labels.length === 1 ? iw / 2 : (i / (labels.length - 1)) * iw);
+  const Y = (v) => PAD.t + ih - (Math.max(0, v) / max) * ih;
+
+  let g = '';
+  const nt = tickCount(max);
+  for (let t = 0; t <= nt; t++) {
+    const y = PAD.t + (t / nt) * ih;
+    const val = max * (1 - t / nt);
+    g += `<line class="grid-line" x1="${PAD.l}" y1="${y.toFixed(1)}" x2="${CW - PAD.r}" y2="${y.toFixed(1)}"/>`;
+    g += `<text class="axis-lbl" x="${PAD.l - 7}" y="${(y + 3).toFixed(1)}" text-anchor="end">${fmt(val)}</text>`;
+  }
+  for (const { i, l } of xLabels(labels)) {
+    g += `<text class="axis-lbl" x="${X(i).toFixed(1)}" y="${CH - 8}" text-anchor="middle">${esc(dayLabel(l))}</text>`;
+  }
+  for (const s of series) {
+    const pts = s.values.map((v, i) => `${X(i).toFixed(1)},${Y(Number(v) || 0).toFixed(1)}`);
+    if (s.fill !== false) {
+      const area = `M${X(0).toFixed(1)},${(PAD.t + ih).toFixed(1)} L${pts.join(' L')} L${X(labels.length - 1).toFixed(1)},${(PAD.t + ih).toFixed(1)} Z`;
+      g += `<path class="area" d="${area}" fill="${s.color}"/>`;
+    }
+    g += `<path class="line" d="M${pts.join(' L')}" stroke="${s.color}"/>`;
+    if (labels.length <= 14) {
+      s.values.forEach((v, i) => { g += `<circle class="dot" cx="${X(i).toFixed(1)}" cy="${Y(Number(v) || 0).toFixed(1)}" r="3" fill="${s.color}"/>`; });
+    }
+  }
+  el.innerHTML = `<svg viewBox="0 0 ${CW} ${CH}" role="img">${g}</svg>`;
+}
+
+// Stacked bar chart. series: [{color, values}] stacked bottom→top per label.
+function stackChart(el, { labels, series, fmt = int }) {
+  if (!labels.length) { el.innerHTML = emptyChart(); return; }
+  const iw = CW - PAD.l - PAD.r, ih = CH - PAD.t - PAD.b;
+  const totals = labels.map((_, i) => series.reduce((s, ser) => s + (Number(ser.values[i]) || 0), 0));
+  const max = niceMax(Math.max(1, ...totals));
+  const n = labels.length;
+  const bw = Math.max(3, Math.min(30, (iw / n) * 0.66));
+  const X = (i) => PAD.l + (n === 1 ? iw / 2 : (i / (n - 1)) * iw);
+  const Y = (v) => PAD.t + ih - (v / max) * ih;
+
+  let g = '';
+  const nt = tickCount(max);
+  for (let t = 0; t <= nt; t++) {
+    const y = PAD.t + (t / nt) * ih;
+    g += `<line class="grid-line" x1="${PAD.l}" y1="${y.toFixed(1)}" x2="${CW - PAD.r}" y2="${y.toFixed(1)}"/>`;
+    g += `<text class="axis-lbl" x="${PAD.l - 7}" y="${(y + 3).toFixed(1)}" text-anchor="end">${fmt(max * (1 - t / nt))}</text>`;
+  }
+  for (const { i, l } of xLabels(labels)) {
+    g += `<text class="axis-lbl" x="${X(i).toFixed(1)}" y="${CH - 8}" text-anchor="middle">${esc(dayLabel(l))}</text>`;
+  }
+  for (let i = 0; i < n; i++) {
+    let acc = 0;
+    for (const s of series) {
+      const v = Number(s.values[i]) || 0;
+      if (v <= 0) continue;
+      const y0 = Y(acc), y1 = Y(acc + v);
+      g += `<rect class="bar" x="${(X(i) - bw / 2).toFixed(1)}" y="${y1.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(0.5, y0 - y1).toFixed(1)}" rx="2" fill="${s.color}"><title>${esc(dayLabel(labels[i]))}: ${fmt(v)}</title></rect>`;
+      acc += v;
+    }
+  }
+  el.innerHTML = `<svg viewBox="0 0 ${CW} ${CH}" role="img">${g}</svg>`;
+}
+const emptyChart = () => `<div class="empty-state">Пока нет данных за этот период.</div>`;
+
+// horizontal proportion bars (browser/license/subject splits)
+function propBars(rows, { color = 'var(--accent)', total } = {}) {
+  const sum = total != null ? total : rows.reduce((s, r) => s + r.value, 0);
+  if (!sum) return emptyChart();
+  return rows.map((r) => {
+    const w = Math.max(2, (r.value / sum) * 100);
+    return `<div class="hbar-row">
+      <div class="lbl">${r.label}</div>
+      <div class="hbar-track"><div class="hbar-fill" style="width:${w.toFixed(1)}%;background:${r.color || color}"></div></div>
+      <div class="val">${r.display != null ? r.display : int(r.value)}</div>
+    </div>`;
+  }).join('');
+}
+
+/* ------------------------------ toast -------------------------------- */
+let toastT;
+function toast(msg) {
+  const el = $('#toast'); el.textContent = msg; el.classList.add('show');
+  clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove('show'), 2600);
+}
+
+/* ============================ VIEWS ============================ */
+
+const state = {
+  view: 'overview',
+  range: { overview: 7, users: 30, money: 30, subjects: 30, retention: 0, errors: 30 },
+  users: { sort: 'cost', browser: '', license: '', q: '', offset: 0, limit: 50 },
+  loaded: {}
+};
+
+/* ---------- Overview ---------- */
+async function loadOverview() {
+  const days = state.range.overview;
+  const ov = $('[data-view="overview"]');
+  $('#ovKpis').innerHTML = skeletonKpis(8);
+  let data, ts;
+  try { [data, ts] = await Promise.all([api(`/admin/stats/overview?days=${days}`), api(`/admin/stats/timeseries?days=${days > 0 ? days : 30}`)]); }
+  catch (e) { $('#ovKpis').innerHTML = errBox(e); return; }
+
+  const u = data.usage, c = data.cost, r = data.revenue, rp = data.revenue_prev, up = data.usage_prev, d = data.devices;
+  const costRub = c.window_usd * USD_RUB;
+  const net = r.revenue_rub - costRub;
+  renderKpis($('#ovKpis'), [
+    { label: 'Выручка', value: rub(r.revenue_rub), accent: true, foot: `${int(r.paid)} оплат · ${deltaChip(r.revenue_rub, rp ? rp.revenue_rub : null)}`, icon: iconMoney() },
+    { label: 'Расход на ИИ', value: usd(c.window_usd), sub: '≈ ' + rub(costRub), foot: deltaChip(c.window_usd, c.prev_usd, 'up_bad') || 'кредиты API', icon: iconChip() },
+    { label: 'Чистыми', value: rub(net), foot: net >= 0 ? 'выручка − расход' : 'пока в минусе', accent: net > 0 },
+    { label: 'Средний чек', value: r.avg_check_rub ? rub(r.avg_check_rub) : '—', foot: `${int(r.subscriptions)} подписок · ${int(r.lifetimes)} навсегда` },
+    { label: 'Активные (MAU)', value: int(d.mau), foot: `DAU ${int(d.dau)} · WAU ${int(d.wau)}`, icon: iconUsers() },
+    { label: 'Всего устройств', value: int(d.total), foot: `+${int(d.new_in_window)} за период` },
+    { label: 'Решений', value: int(u.solves), foot: `${deltaChip(u.solves, up ? up.solves : null)} · ${int(u.tests)} тестов · ${int(u.gdz)} ГДЗ` },
+    { label: 'Расход на юзера', value: usd(c.per_active_user_usd), foot: `в день ${usd(c.per_user_day_usd)} · мес ${usd(c.per_user_month_usd)}` }
+  ]);
+
+  const rows = ts.rows;
+  const labels = rows.map((x) => x.day);
+  $('#ovMoneyNote').textContent = `$1 ≈ ${USD_RUB} ₽`;
+  lineChart($('#ovMoneyChart'), {
+    labels,
+    series: [
+      { color: 'var(--green)', values: rows.map((x) => x.revenue_rub) },
+      { color: 'var(--warn)', values: rows.map((x) => x.cost_usd * USD_RUB) }
+    ],
+    fmt: (v) => v >= 1000 ? (v / 1000).toFixed(0) + 'k' : int(v)
+  });
+  lineChart($('#ovDauChart'), { labels, series: [{ color: 'var(--accent)', values: rows.map((x) => x.active) }] });
+  stackChart($('#ovUsageChart'), {
+    labels,
+    series: [
+      { color: 'var(--accent)', values: rows.map((x) => x.solves) },
+      { color: 'var(--violet)', values: rows.map((x) => x.tests) },
+      { color: 'var(--blue)', values: rows.map((x) => x.gdz) }
+    ]
+  });
+
+  const totalBrowsers = d.browsers.reduce((s, b) => s + b.n, 0);
+  $('#ovBrowsers').innerHTML =
+    `<div class="panel-sub" style="margin-bottom:8px">Браузеры · всего ${int(totalBrowsers)}</div>` +
+    propBars(d.browsers.map((b) => ({ label: BROWSER_LABEL[b.browser] || b.browser, value: b.n, color: browserColor(b.browser) }))) +
+    `<div class="panel-sub" style="margin:16px 0 8px">Лицензии на устройствах</div>` +
+    propBars(d.license_types.map((l) => ({ label: LICENSE_LABEL[l.type] || l.type, value: l.n, color: l.type === 'none' ? 'var(--tertiary)' : 'var(--accent)' })));
+}
+const browserColor = (b) => ({ chrome: 'var(--blue)', yandex: 'var(--danger)', opera: 'var(--danger)', edge: 'var(--green)', firefox: 'var(--warn)' }[b] || 'var(--tertiary)');
+
+/* ---------- Users ---------- */
+let userSearchT;
+async function loadUsers() {
+  const days = state.range.users, u = state.users;
+  const body = $('#usersBody');
+  body.innerHTML = `<tr class="loading-row"><td colspan="12">Загрузка…</td></tr>`;
+  const qs = new URLSearchParams({ days, sort: u.sort, browser: u.browser, license: u.license, q: u.q, limit: u.limit, offset: u.offset });
+  let data;
+  try { data = await api('/admin/stats/users?' + qs); }
+  catch (e) { body.innerHTML = `<tr class="loading-row"><td colspan="12">Ошибка: ${esc(e.message)}</td></tr>`; return; }
+
+  // Top-line KPIs for the cohort in view.
+  try {
+    const ov = await api(`/admin/stats/overview?days=${days}`);
+    renderKpis($('#usersKpis'), [
+      { label: 'Активных за период', value: int(ov.usage.active_devices), icon: iconUsers() },
+      { label: 'Платных устройств', value: int((ov.devices.license_types.find((l) => l.type === 'subscription')?.n || 0) + (ov.devices.license_types.find((l) => l.type === 'lifetime')?.n || 0)) },
+      { label: 'Расход на всех', value: usd(ov.usage.cost_usd), sub: '≈ ' + rub(ov.usage.cost_usd * USD_RUB), accent: true },
+      { label: 'Средний расход/юзера', value: usd(ov.cost.per_active_user_usd) }
+    ]);
+  } catch { /* KPIs are best-effort */ }
+
+  if (!data.users.length) {
+    body.innerHTML = `<tr class="loading-row"><td colspan="12">Ничего не найдено.</td></tr>`;
+  } else {
+    body.innerHTML = data.users.map((x, i) => {
+      const rank = u.offset + i + 1;
+      const lic = x.license_type && x.license_type !== 'none'
+        ? `<span class="badge ${x.license_type === 'lifetime' ? 'lifetime' : 'sub'}">${LICENSE_LABEL[x.license_type] || x.license_type}</span>`
+        : `<span class="badge none">нет</span>`;
+      return `<tr class="clickable" data-device="${esc(x.device_id)}">
+        <td class="rank">${rank}</td>
+        <td class="mono">${esc(x.device_id.slice(0, 8))}…${x.version ? ` <span class="muted">v${esc(x.version)}</span>` : ''}</td>
+        <td><span class="badge ${x.browser || 'other'}">${BROWSER_LABEL[x.browser] || 'Другой'}</span></td>
+        <td>${lic}</td>
+        <td class="num">${int(x.solves)}</td>
+        <td class="num">${int(x.tests)}</td>
+        <td class="num">${int(x.gdz)}</td>
+        <td class="num">${int(x.pdf)}</td>
+        <td class="num">${tokens(x.tokens)}</td>
+        <td class="num">${int(x.active_days)}</td>
+        <td class="num spent">${usd(x.cost_usd)}</td>
+        <td class="muted">${timeAgo(x.last_seen)}</td>
+      </tr>`;
+    }).join('');
+  }
+  const from = data.total ? u.offset + 1 : 0;
+  const to = u.offset + data.users.length;
+  $('#usersCount').textContent = `${from}–${to} из ${int(data.total)} устройств`;
+  $('#usersPrev').disabled = u.offset === 0;
+  $('#usersNext').disabled = to >= data.total;
+}
+
+/* ---------- Money ---------- */
+async function loadMoney() {
+  const days = state.range.money;
+  $('#moneyKpis').innerHTML = skeletonKpis(4);
+  let data, refs;
+  try { [data, refs] = await Promise.all([api(`/admin/stats/purchases?days=${days}`), api('/admin/stats/referrals')]); }
+  catch (e) { $('#moneyKpis').innerHTML = errBox(e); return; }
+  const s = data.summary;
+  renderKpis($('#moneyKpis'), [
+    { label: 'Выручка за период', value: rub(s.revenue_rub), accent: true, foot: `${int(s.paid)} оплаченных ключей`, icon: iconMoney() },
+    { label: 'Средний чек', value: s.avg_check_rub ? rub(s.avg_check_rub) : '—', foot: `${int(s.subscriptions)} подписок · ${int(s.lifetimes)} навсегда` },
+    { label: 'Возвраты/отзывы', value: int(s.revoked), foot: `${int(s.preorders)} предзаказов` },
+    { label: 'Реф. награды', value: int(s.referral_rewards), foot: `${int(refs.total_referred_purchases)} покупок по кодам` }
+  ]);
+
+  $('#moneyCount').textContent = `${data.purchases.length} записей`;
+  const pb = $('#purchasesBody');
+  pb.innerHTML = data.purchases.length ? data.purchases.map((p) => {
+    const contact = p.email || (p.telegram_user_id ? 'TG ' + p.telegram_user_id : '—');
+    const typeBadge = p.type === 'lifetime' ? '<span class="badge lifetime">Навсегда</span>' : p.type === 'subscription' ? '<span class="badge sub">Подписка</span>' : `<span class="badge none">${esc(p.type || '—')}</span>`;
+    const statusBadge = p.status === 'revoked' ? '<span class="badge revoked">отозван</span>' : '<span class="badge paid">активен</span>';
+    return `<tr>
+      <td>${fmtDate(p.issued_at)}</td>
+      <td>${typeBadge}</td>
+      <td class="muted">${esc(p.gateway || '—')}</td>
+      <td class="num money${p.amount_rub ? ' pos' : ''}">${p.amount_rub ? int(p.amount_rub) : '—'}</td>
+      <td class="mono">${esc(contact)}</td>
+      <td>${statusBadge}</td>
+    </tr>`;
+  }).join('') : `<tr class="loading-row"><td colspan="6">Пока нет покупок за этот период.</td></tr>`;
+
+  $('#gatewaysBox').innerHTML = data.gateways.length
+    ? propBars(data.gateways.map((g) => ({ label: esc(g.gateway), value: g.revenue_rub || g.n, display: g.revenue_rub ? rub(g.revenue_rub) : int(g.n) + ' шт' })))
+    : emptyChart();
+
+  $('#referralsBox').innerHTML = `
+    <div class="mini-kpis" style="grid-template-columns:repeat(3,1fr)">
+      <div class="mini-kpi"><div class="l">Кодов</div><div class="v">${int(refs.total_codes)}</div></div>
+      <div class="mini-kpi"><div class="l">Покупок</div><div class="v">${int(refs.total_referred_purchases)}</div></div>
+      <div class="mini-kpi"><div class="l">Дней выдано</div><div class="v">${int(refs.total_days_earned)}</div></div>
+    </div>
+    ${refs.top.length ? `<div class="panel-sub" style="margin:14px 0 6px">Топ рефереров</div>` + refs.top.slice(0, 8).map((r) =>
+      `<div class="hbar-row" style="grid-template-columns:1fr auto auto;gap:10px">
+        <div class="lbl mono">${esc(r.code)}</div>
+        <div class="val">${int(r.purchases)} пок.</div>
+        <div class="val" style="color:var(--accent)">+${int(r.days_earned)} дн</div>
+      </div>`).join('') : ''}`;
+}
+
+/* ---------- Subjects ---------- */
+async function loadSubjects() {
+  const days = state.range.subjects;
+  const bars = $('#subjectBars');
+  bars.innerHTML = `<div class="empty-state">Загрузка…</div>`;
+  let data;
+  try { data = await api(`/admin/stats/subjects?days=${days}`); }
+  catch (e) { bars.innerHTML = errBox(e); return; }
+  const subs = data.subjects;
+  if (!subs.length) { bars.innerHTML = emptyChart(); $('#subjectsBody').innerHTML = `<tr class="loading-row"><td colspan="6">Пока нет данных.</td></tr>`; return; }
+  const max = Math.max(...subs.map((s) => s.n));
+  bars.innerHTML = subs.slice(0, 12).map((s) => `
+    <div class="hbar-row">
+      <div class="lbl">${esc(s.subject)}</div>
+      <div class="hbar-track"><div class="hbar-fill" style="width:${Math.max(2, (s.n / max) * 100).toFixed(1)}%"></div></div>
+      <div class="val">${int(s.n)}</div>
+    </div>`).join('');
+  $('#subjectsBody').innerHTML = subs.map((s) => `<tr>
+    <td class="strong">${esc(s.subject)}</td>
+    <td class="num">${int(s.n)}</td>
+    <td class="num">${int(s.solves)}</td>
+    <td class="num">${int(s.gdz)}</td>
+    <td class="num">${int(s.devices)}</td>
+    <td class="num spent">${usd(s.cost_usd)}</td>
+  </tr>`).join('');
+}
+
+/* ---------- Retention ---------- */
+async function loadRetention() {
+  $('#retentionKpis').innerHTML = skeletonKpis(3);
+  let data;
+  try { data = await api('/admin/stats/retention'); }
+  catch (e) { $('#retentionKpis').innerHTML = errBox(e); return; }
+  const c = data.classic;
+  renderKpis($('#retentionKpis'), [
+    { label: 'Возврат D1', value: pct(c.d1.rate), foot: `${int(c.d1.returned)} из ${int(c.d1.eligible)} устройств`, accent: true },
+    { label: 'Возврат D7', value: pct(c.d7.rate), foot: `${int(c.d7.returned)} из ${int(c.d7.eligible)}` },
+    { label: 'Возврат D30', value: pct(c.d30.rate), foot: `${int(c.d30.returned)} из ${int(c.d30.eligible)}` }
+  ]);
+
+  const wrap = $('#cohortWrap');
+  if (!data.cohorts.length) { wrap.innerHTML = emptyChart(); return; }
+  let html = '<table class="cohort"><thead><tr><th class="colhead" style="text-align:right">Когорта</th><th class="colhead"></th>';
+  for (let w = 0; w < 8; w++) html += `<th class="colhead">Н${w}</th>`;
+  html += '</tr></thead><tbody>';
+  for (const co of data.cohorts) {
+    html += `<tr><td class="rowhead">${fmtDate(Date.parse(co.cohort))}</td><td class="size">${int(co.size)} чел</td>`;
+    for (let w = 0; w < 8; w++) {
+      const v = co.weeks[w];
+      if (v == null) { html += `<td><div class="cell empty"></div></td>`; continue; }
+      const rate = co.size ? v / co.size : 0;
+      const op = w === 0 ? 1 : Math.max(0.12, rate);
+      const shown = w === 0 ? '100%' : (rate * 100).toFixed(0) + '%';
+      html += `<td><div class="cell" style="background:color-mix(in srgb, var(--accent) ${Math.round(op * 100)}%, var(--surface-2))" title="${int(v)} из ${int(co.size)}">${v ? shown : ''}</div></td>`;
+    }
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  wrap.innerHTML = html;
+}
+
+/* ---------- Errors ---------- */
+async function loadErrors() {
+  const days = state.range.errors;
+  const body = $('#errorsBody');
+  body.innerHTML = `<tr class="loading-row"><td colspan="4">Загрузка…</td></tr>`;
+  let data;
+  try { data = await api(`/admin/stats/errors?days=${days}`); }
+  catch (e) { body.innerHTML = `<tr class="loading-row"><td colspan="4">Ошибка: ${esc(e.message)}</td></tr>`; return; }
+  $('#errCount').textContent = `${data.errors.length} записей`;
+  if (!data.errors.length) { body.innerHTML = `<tr class="loading-row"><td colspan="4">Ошибок нет — хорошо.</td></tr>`; return; }
+  body.innerHTML = data.errors.map((e) => {
+    let meta = {}; try { meta = JSON.parse(e.meta || '{}'); } catch { /* */ }
+    return `<tr>
+      <td class="muted" style="white-space:nowrap">${fmtDateTime(e.ts)}</td>
+      <td class="mono">${esc(meta.op || '—')}</td>
+      <td>${esc(meta.msg || '—')}</td>
+      <td class="mono">${esc(String(e.device_id || '').slice(0, 8))}…</td>
+    </tr>`;
+  }).join('');
+}
+
+/* ---------- User drawer ---------- */
+async function openUser(deviceId) {
+  const drawer = $('#drawer'), scrim = $('#drawerScrim'), bodyEl = $('#drawerBody');
+  $('#drawerTitle').textContent = deviceId.slice(0, 8) + '…';
+  bodyEl.innerHTML = `<div class="empty-state">Загрузка…</div>`;
+  drawer.classList.add('open'); scrim.classList.add('open'); drawer.setAttribute('aria-hidden', 'false');
+  let data;
+  try { data = await api('/admin/stats/user?device_id=' + encodeURIComponent(deviceId)); }
+  catch (e) { bodyEl.innerHTML = errBox(e); return; }
+  const d = data.device, lt = data.lifetime, lic = data.license;
+  const licLine = lic
+    ? `${LICENSE_LABEL[lic.type] || lic.type} · ${lic.status}${lic.expires_at ? ' · до ' + fmtDate(Date.parse(lic.expires_at)) : ''}`
+    : (d.license_key ? 'ключ есть, деталей нет' : 'без лицензии');
+
+  const daily = data.daily;
+  const dailyLabels = daily.map((x) => x.day);
+  bodyEl.innerHTML = `
+    <div class="mini-kpis">
+      <div class="mini-kpi"><div class="l">Использований</div><div class="v">${int(lt.uses)}</div></div>
+      <div class="mini-kpi"><div class="l">Расход $</div><div class="v">${usd(lt.cost_usd)}</div></div>
+      <div class="mini-kpi"><div class="l">Дней активн.</div><div class="v">${int(lt.active_days)}</div></div>
+    </div>
+    <dl class="kv">
+      <dt>Устройство</dt><dd class="mono" style="font-size:11.5px">${esc(d.device_id)}</dd>
+      <dt>Браузер</dt><dd><span class="badge ${d.browser || 'other'}">${BROWSER_LABEL[d.browser] || 'Другой'}</span> ${d.version ? 'v' + esc(d.version) : ''}</dd>
+      <dt>Провайдер</dt><dd>${esc(d.provider || '—')}</dd>
+      <dt>Лицензия</dt><dd>${esc(licLine)}</dd>
+      <dt>Ключ</dt><dd class="mono" style="font-size:11.5px">${esc(d.license_key || '—')}</dd>
+      <dt>Реф-код</dt><dd class="mono">${esc(data.referral_code || '—')}</dd>
+      <dt>Первый визит</dt><dd>${fmtDate(d.first_seen)}</dd>
+      <dt>Последний</dt><dd>${timeAgo(d.last_seen)}</dd>
+      <dt>Токенов всего</dt><dd>${tokens(lt.tokens)}</dd>
+    </dl>
+    ${daily.length ? `<div><div class="panel-sub" style="margin-bottom:6px">Использования по дням (60 дн)</div><div class="chart" id="drawerChart"></div></div>` : ''}
+    ${data.subjects.length ? `<div><div class="panel-sub" style="margin-bottom:6px">Предметы</div>${propBars(data.subjects.map((s) => ({ label: esc(s.subject), value: s.n })))}</div>` : ''}
+    <div><div class="panel-sub" style="margin-bottom:6px">Последние события (${data.recent.length})</div><div class="ev-list">${
+      data.recent.map((ev) => `<div class="ev-row"><div><span class="ev-type">${esc(EV_LABEL[ev.type] || ev.type)}</span>${ev.subject ? ' · ' + esc(ev.subject) : ''}${ev.cost_usd ? ' · ' + usd(ev.cost_usd) : ''}</div><div class="ev-when">${fmtDateTime(ev.ts)}</div></div>`).join('')
+    }</div></div>`;
+  if (daily.length) lineChart($('#drawerChart'), { labels: dailyLabels, series: [{ color: 'var(--accent)', values: daily.map((x) => x.uses) }] });
+}
+const EV_LABEL = { solve: 'Решение', test_solve: 'Тест', test_requestion: 'Перерешать', gdz_pull: 'ГДЗ', heartbeat: 'Активность', install: 'Установка', update: 'Обновление', error: 'Ошибка' };
+function closeDrawer() { $('#drawer').classList.remove('open'); $('#drawerScrim').classList.remove('open'); $('#drawer').setAttribute('aria-hidden', 'true'); }
+
+/* ---------- helpers ---------- */
+function skeletonKpis(n) { return Array.from({ length: n }, () => `<div class="kpi"><div class="kpi-label skeleton">загрузка</div><div class="kpi-value skeleton">000</div></div>`).join(''); }
+function errBox(e) { return `<div class="empty-state">Не удалось загрузить: ${esc(e.message)}</div>`; }
+function iconMoney() { return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>`; }
+function iconChip() { return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>`; }
+function iconUsers() { return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>`; }
+
+const LOADERS = { overview: loadOverview, users: loadUsers, money: loadMoney, subjects: loadSubjects, retention: loadRetention, errors: loadErrors };
+function showView(view, force) {
+  state.view = view;
+  $$('.nav-btn').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
+  $$('.panelview').forEach((p) => p.classList.toggle('active', p.dataset.view === view));
+  if (force || !state.loaded[view]) { state.loaded[view] = true; LOADERS[view](); }
+}
+function reload(view) { state.loaded[view] = false; if (state.view === view) showView(view, true); }
+
+/* ============================ boot ============================ */
+function initTheme() {
+  const saved = localStorage.getItem('smesh_dash_theme') || 'light';
+  document.documentElement.setAttribute('data-theme', saved);
+  $$('#themeSeg button').forEach((b) => b.classList.toggle('active', b.dataset.pref === saved));
+}
+function bindChrome() {
+  $('#nav').addEventListener('click', (e) => { const b = e.target.closest('.nav-btn'); if (b) showView(b.dataset.view); });
+  $('#themeSeg').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    const pref = b.dataset.pref;
+    document.documentElement.setAttribute('data-theme', pref);
+    localStorage.setItem('smesh_dash_theme', pref);
+    $$('#themeSeg button').forEach((x) => x.classList.toggle('active', x === b));
+  });
+  // range segmented controls
+  $$('.seg[data-range]').forEach((seg) => {
+    seg.addEventListener('click', (e) => {
+      const b = e.target.closest('button'); if (!b) return;
+      const view = seg.dataset.range;
+      state.range[view] = Number(b.dataset.days);
+      $$('button', seg).forEach((x) => x.classList.toggle('active', x === b));
+      if (view === 'users') state.users.offset = 0;
+      reload(view);
+    });
+  });
+  // users controls
+  $('#userSort').addEventListener('change', (e) => { state.users.sort = e.target.value; state.users.offset = 0; reload('users'); });
+  $('#userBrowser').addEventListener('change', (e) => { state.users.browser = e.target.value; state.users.offset = 0; reload('users'); });
+  $('#userLicense').addEventListener('change', (e) => { state.users.license = e.target.value; state.users.offset = 0; reload('users'); });
+  $('#userSearch').addEventListener('input', (e) => { clearTimeout(userSearchT); userSearchT = setTimeout(() => { state.users.q = e.target.value.trim(); state.users.offset = 0; reload('users'); }, 350); });
+  $('#usersPrev').addEventListener('click', () => { state.users.offset = Math.max(0, state.users.offset - state.users.limit); reload('users'); });
+  $('#usersNext').addEventListener('click', () => { state.users.offset += state.users.limit; reload('users'); });
+  $('#usersBody').addEventListener('click', (e) => { const tr = e.target.closest('tr[data-device]'); if (tr) openUser(tr.dataset.device); });
+  // drawer
+  $('#drawerClose').addEventListener('click', closeDrawer);
+  $('#drawerScrim').addEventListener('click', closeDrawer);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+  // sync + logout
+  $('#syncBtn').addEventListener('click', async () => {
+    toast('Синхронизирую…');
+    const r = await apiPost('/admin/backfill-licenses');
+    toast(r.ok ? `Готово: ${r.imported} лицензий` : 'Ошибка синхронизации');
+    if (r.ok) { reload('money'); reload('overview'); }
+  });
+  $('#logoutBtn').addEventListener('click', logout);
+}
+
+function enterApp() {
+  $('#gate').style.display = 'none';
+  $('#shell').hidden = false;
+  showView('overview', true);
+}
+function logout() { clearToken(); $('#shell').hidden = true; $('#gate').style.display = 'grid'; $('#tokenInput').value = ''; }
+
+async function tryToken(t, remember) {
+  const probe = await fetch(API_BASE + '/admin/stats/overview?days=1', { headers: { 'x-admin-token': t } });
+  if (probe.status === 401) throw new Error('Неверный ключ.');
+  if (!probe.ok) throw new Error('Сервер недоступен (' + probe.status + ').');
+  saveToken(t, remember);
+  enterApp();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  initTheme();
+  bindChrome();
+  $('#gateForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const t = $('#tokenInput').value.trim();
+    const err = $('#gateErr');
+    err.textContent = '';
+    if (!t) { err.textContent = 'Введите ключ.'; return; }
+    try { await tryToken(t, $('#rememberToken').checked); }
+    catch (ex) { err.textContent = ex.message; }
+  });
+  // auto-enter if we already have a stored token that still works
+  if (token) {
+    tryToken(token, localStorage.getItem(TOKEN_KEY) ? true : false).catch(() => { clearToken(); });
+  }
+});

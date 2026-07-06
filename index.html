@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>СМЭШ AI — панель</title>
+  <meta name="description" content="Внутренняя панель аналитики СМЭШ AI: выручка, расход на ИИ, удержание и пользователи." />
+  <meta name="robots" content="noindex, nofollow" />
+  <link rel="icon" type="image/png" href="assets/favicon-32.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- ============ Login gate ============ -->
+  <div class="gate" id="gate">
+    <form class="gate-card" id="gateForm" autocomplete="off">
+      <img src="assets/logo-mark.png" alt="СМЭШ AI" />
+      <h1>Панель СМЭШ AI</h1>
+      <p>Внутренняя аналитика. Введите админ-ключ, чтобы продолжить.</p>
+      <div class="field">
+        <label for="tokenInput">Админ-ключ</label>
+        <input id="tokenInput" type="password" placeholder="smesh_admin_…" autocomplete="off" spellcheck="false" />
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12.5px;color:var(--secondary);text-align:left;cursor:pointer">
+        <input type="checkbox" id="rememberToken" checked /> Запомнить на этом устройстве
+      </label>
+      <button class="btn primary" type="submit" style="width:100%;margin-top:18px">Войти</button>
+      <p class="gate-err" id="gateErr"></p>
+    </form>
+  </div>
+
+  <!-- ============ App ============ -->
+  <div class="shell" id="shell" hidden>
+    <aside class="sidebar">
+      <div class="brand">
+        <img src="assets/logo-mark.png" alt="" />
+        <div class="brandtext">
+          <h1>СМЭШ AI</h1>
+          <span>Панель · только для меня</span>
+        </div>
+      </div>
+
+      <nav class="side-nav" id="nav" role="tablist" aria-label="Разделы">
+        <button class="nav-btn active" data-view="overview" role="tab" type="button">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>
+          <span>Обзор</span>
+        </button>
+        <button class="nav-btn" data-view="users" role="tab" type="button">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <span>Пользователи</span>
+        </button>
+        <button class="nav-btn" data-view="money" role="tab" type="button">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+          <span>Деньги</span>
+        </button>
+        <button class="nav-btn" data-view="subjects" role="tab" type="button">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+          <span>Предметы</span>
+        </button>
+        <button class="nav-btn" data-view="retention" role="tab" type="button">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+          <span>Удержание</span>
+        </button>
+        <button class="nav-btn" data-view="errors" role="tab" type="button">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <span>Ошибки</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="theme-seg" id="themeSeg" role="group" aria-label="Тема">
+          <button data-pref="light" type="button" title="Светлая" aria-label="Светлая"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg></button>
+          <button data-pref="dark" type="button" title="Тёмная" aria-label="Тёмная"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg></button>
+        </div>
+        <div class="side-meta">
+          <button id="syncBtn" type="button" title="Пересобрать таблицу лицензий из KV">Синхронизировать лицензии</button>
+          <div style="margin-top:8px"><button id="logoutBtn" type="button">Выйти</button></div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="content">
+      <!-- ---------- Overview ---------- -->
+      <section class="panelview active" data-view="overview">
+        <div class="page-head">
+          <div>
+            <p class="eyebrow">Сводка</p>
+            <h2>Обзор</h2>
+            <p class="sub">Деньги на входе, расход на ИИ, активность и использование функций. Всё за выбранный период (мск).</p>
+          </div>
+          <div class="seg" data-range="overview" role="group" aria-label="Период">
+            <button data-days="1">День</button>
+            <button data-days="7" class="active">Неделя</button>
+            <button data-days="30">Месяц</button>
+            <button data-days="0">Всё</button>
+          </div>
+        </div>
+        <div class="kpi-grid" id="ovKpis"></div>
+        <div class="two-col">
+          <section class="panel">
+            <div class="panel-head-row"><h3>Выручка и расход на ИИ</h3><span class="muted" id="ovMoneyNote" style="font-size:11.5px"></span></div>
+            <div class="chart chart-wrap" id="ovMoneyChart"></div>
+            <div class="legend">
+              <span><i style="background:var(--green)"></i>Выручка, ₽</span>
+              <span><i style="background:var(--warn)"></i>Расход на ИИ, ₽</span>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-head-row"><h3>Активные устройства</h3></div>
+            <div class="chart chart-wrap" id="ovDauChart"></div>
+            <div class="legend"><span><i style="background:var(--accent)"></i>Активных в день (DAU)</span></div>
+          </section>
+        </div>
+        <div class="two-col">
+          <section class="panel">
+            <div class="panel-head-row"><h3>Что решали</h3><span class="muted" style="font-size:11.5px">за период</span></div>
+            <div class="chart chart-wrap" id="ovUsageChart"></div>
+            <div class="legend">
+              <span><i style="background:var(--accent)"></i>Решения</span>
+              <span><i style="background:var(--violet)"></i>Тесты</span>
+              <span><i style="background:var(--blue)"></i>ГДЗ</span>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-head-row"><h3>Браузеры и лицензии</h3></div>
+            <div id="ovBrowsers"></div>
+          </section>
+        </div>
+      </section>
+
+      <!-- ---------- Users ---------- -->
+      <section class="panelview" data-view="users">
+        <div class="page-head">
+          <div>
+            <p class="eyebrow">Люди</p>
+            <h2>Пользователи</h2>
+            <p class="sub">Каждое устройство с расширением. По умолчанию — топ по расходу на мои API-кредиты.</p>
+          </div>
+          <div class="seg" data-range="users" role="group" aria-label="Период">
+            <button data-days="1">День</button>
+            <button data-days="7">Неделя</button>
+            <button data-days="30" class="active">Месяц</button>
+            <button data-days="0">Всё</button>
+          </div>
+        </div>
+        <div class="kpi-grid" id="usersKpis"></div>
+        <section class="panel">
+          <div class="toolbar" style="margin-bottom:14px">
+            <div class="grow"><input class="search" id="userSearch" type="search" placeholder="Поиск по device_id или ключу…" /></div>
+            <select class="select-mini" id="userSort">
+              <option value="cost">Сортировка: расход $ (по убыв.)</option>
+              <option value="events">по использованию</option>
+              <option value="tokens">по токенам</option>
+              <option value="recent">по недавней активности</option>
+              <option value="new">по дате установки</option>
+            </select>
+            <select class="select-mini" id="userBrowser">
+              <option value="">Все браузеры</option>
+              <option value="chrome">Chrome</option>
+              <option value="yandex">Yandex</option>
+              <option value="opera">Opera</option>
+              <option value="edge">Edge</option>
+              <option value="firefox">Firefox</option>
+              <option value="other">Другие</option>
+            </select>
+            <select class="select-mini" id="userLicense">
+              <option value="">Все лицензии</option>
+              <option value="paid">Платные</option>
+              <option value="none">Без лицензии</option>
+            </select>
+          </div>
+          <div class="table-scroll">
+            <table id="usersTable">
+              <thead><tr>
+                <th class="rank">#</th>
+                <th>Устройство</th>
+                <th>Браузер</th>
+                <th>Лицензия</th>
+                <th class="num">Решения</th>
+                <th class="num">Тесты</th>
+                <th class="num">ГДЗ</th>
+                <th class="num">PDF</th>
+                <th class="num">Токены</th>
+                <th class="num">Дней актив.</th>
+                <th class="num">Расход, $</th>
+                <th>Активность</th>
+              </tr></thead>
+              <tbody id="usersBody"></tbody>
+            </table>
+          </div>
+          <div class="toolbar" style="margin-top:14px;justify-content:space-between">
+            <span class="muted" id="usersCount" style="font-size:12px"></span>
+            <div style="display:flex;gap:8px">
+              <button class="btn sm ghost" id="usersPrev">Назад</button>
+              <button class="btn sm ghost" id="usersNext">Вперёд</button>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <!-- ---------- Money ---------- -->
+      <section class="panelview" data-view="money">
+        <div class="page-head">
+          <div>
+            <p class="eyebrow">Деньги</p>
+            <h2>Покупки и выручка</h2>
+            <p class="sub">Кто и сколько заплатил, средний чек, подписки и пожизненные, реферальная программа.</p>
+          </div>
+          <div class="seg" data-range="money" role="group" aria-label="Период">
+            <button data-days="7">Неделя</button>
+            <button data-days="30" class="active">Месяц</button>
+            <button data-days="90">90 дней</button>
+            <button data-days="0">Всё</button>
+          </div>
+        </div>
+        <div class="kpi-grid" id="moneyKpis"></div>
+        <div class="two-col">
+          <section class="panel">
+            <div class="panel-head-row"><h3>Последние покупки</h3><span class="muted" id="moneyCount" style="font-size:11.5px"></span></div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr>
+                  <th>Дата</th><th>Тип</th><th>Шлюз</th><th class="num">Сумма, ₽</th><th>Контакт</th><th>Статус</th>
+                </tr></thead>
+                <tbody id="purchasesBody"></tbody>
+              </table>
+            </div>
+          </section>
+          <div style="display:flex;flex-direction:column;gap:16px">
+            <section class="panel">
+              <div class="panel-head-row"><h3>По шлюзам</h3></div>
+              <div id="gatewaysBox"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head-row"><h3>Рефералы</h3></div>
+              <div id="referralsBox"></div>
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- Subjects ---------- -->
+      <section class="panelview" data-view="subjects">
+        <div class="page-head">
+          <div>
+            <p class="eyebrow">Предметы</p>
+            <h2>Популярные предметы</h2>
+            <p class="sub">Что решают чаще всего — по числу обращений, устройствам и расходу на ИИ.</p>
+          </div>
+          <div class="seg" data-range="subjects" role="group" aria-label="Период">
+            <button data-days="1">День</button>
+            <button data-days="7">Неделя</button>
+            <button data-days="30" class="active">Месяц</button>
+            <button data-days="0">Всё</button>
+          </div>
+        </div>
+        <div class="two-col">
+          <section class="panel">
+            <div class="panel-head-row"><h3>Топ по обращениям</h3></div>
+            <div id="subjectBars"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head-row"><h3>Детально</h3></div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>Предмет</th><th class="num">Всего</th><th class="num">Решения</th><th class="num">ГДЗ</th><th class="num">Устройств</th><th class="num">Расход, $</th></tr></thead>
+                <tbody id="subjectsBody"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <!-- ---------- Retention ---------- -->
+      <section class="panelview" data-view="retention">
+        <div class="page-head">
+          <div>
+            <p class="eyebrow">Удержание</p>
+            <h2>Возвращаемость</h2>
+            <p class="sub">Возврат на 1-й / 7-й / 30-й день и недельные когорты — доля устройств, вернувшихся спустя N недель после установки.</p>
+          </div>
+        </div>
+        <div class="kpi-grid" id="retentionKpis"></div>
+        <section class="panel">
+          <div class="panel-head-row"><h3>Недельные когорты</h3><span class="muted" style="font-size:11.5px">% вернувшихся по неделям с установки</span></div>
+          <div class="table-scroll" id="cohortWrap"></div>
+        </section>
+      </section>
+
+      <!-- ---------- Errors ---------- -->
+      <section class="panelview" data-view="errors">
+        <div class="page-head">
+          <div>
+            <p class="eyebrow">Диагностика</p>
+            <h2>Ошибки</h2>
+            <p class="sub">Последние ошибки, о которых сообщили клиенты (тексты наши/провайдера, без данных пользователя).</p>
+          </div>
+          <div class="seg" data-range="errors" role="group" aria-label="Период">
+            <button data-days="7">Неделя</button>
+            <button data-days="30" class="active">Месяц</button>
+            <button data-days="0">Всё</button>
+          </div>
+        </div>
+        <section class="panel">
+          <div class="panel-head-row"><h3>Журнал ошибок</h3><span class="muted" id="errCount" style="font-size:11.5px"></span></div>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Время</th><th>Операция</th><th>Сообщение</th><th>Устройство</th></tr></thead>
+              <tbody id="errorsBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <!-- user detail drawer -->
+  <div class="drawer-scrim" id="drawerScrim"></div>
+  <aside class="drawer" id="drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <h3 id="drawerTitle">Устройство</h3>
+      <button class="icon-btn" id="drawerClose" aria-label="Закрыть"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="drawer-body" id="drawerBody"></div>
+  </aside>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
