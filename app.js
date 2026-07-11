@@ -3,7 +3,11 @@
 
 'use strict';
 
-const API_BASE = 'https://smesh-licenses.smeshai.workers.dev';
+// The worker's custom domain (smeshapi.site) — NOT the old *.workers.dev URL:
+// that pointed at the pre-2026-07-07 Cloudflare account (stale D1) and the
+// suffix is DPI-blocked in RU anyway. The worker allows this dashboard's
+// origin (and only it) on /admin/stats/* — see statsCors in worker.js.
+const API_BASE = 'https://smeshapi.site';
 // AI spend is billed in USD; revenue is in RUB. The USD→RUB rate is fetched
 // LIVE from exchangerate-api.com via the worker (the API key stays a server
 // secret) — never a hardcoded guess. See loadRate() / fxRate().
@@ -234,14 +238,18 @@ function stackChart(el, { labels, series, fmt = int }) {
 }
 const emptyChart = () => `<div class="empty-state">Пока нет данных за этот период.</div>`;
 
-// horizontal proportion bars (browser/license/subject splits)
+// horizontal proportion bars (browser/license/subject splits).
+// Labels are ALWAYS escaped here (not at call sites): several of them come
+// from client-controlled telemetry fields (license_type, subject), and an
+// unescaped label in the ADMIN dashboard would be stored XSS with the admin
+// token in localStorage as the prize.
 function propBars(rows, { color = 'var(--accent)', total } = {}) {
   const sum = total != null ? total : rows.reduce((s, r) => s + r.value, 0);
   if (!sum) return emptyChart();
   return rows.map((r) => {
     const w = Math.max(2, (r.value / sum) * 100);
     return `<div class="hbar-row">
-      <div class="lbl">${r.label}</div>
+      <div class="lbl">${esc(r.label)}</div>
       <div class="hbar-track"><div class="hbar-fill" style="width:${w.toFixed(1)}%;background:${r.color || color}"></div></div>
       <div class="val">${r.display != null ? r.display : int(r.value)}</div>
     </div>`;
@@ -263,7 +271,8 @@ const state = {
   users: { sort: 'cost', browser: '', license: '', q: '', offset: 0, limit: 50 },
   loaded: {},
   rate: { ok: false, rate: null, fetched_at: null, stale: true }, // live USD→RUB
-  captured: false // has any real token/cost usage been recorded yet?
+  captured: false, // has any real token/cost usage been recorded yet?
+  apiLive: false   // has the VPS server-truth pipeline (/t/ai) sent anything?
 };
 
 // Fetch the live USD→RUB rate (worker-proxied; key stays server-side) and paint
@@ -283,23 +292,29 @@ function renderRateChip() {
   el.innerHTML = `1&nbsp;$ = <b>${state.rate.rate.toFixed(2)}&nbsp;₽</b> <span class="rate-src${stale ? ' stale' : ''}">${stale ? 'кэш' : 'live'}</span>`;
   el.title = 'Курс exchangerate-api · обновлён ' + fmtDateTime(Date.parse(state.rate.fetched_at));
 }
-// "Is the token/cost capture proven?" — true once any real usage exists all-time.
+// "Is the token/cost capture proven?" — true once any real usage exists
+// all-time, on EITHER pipeline: client telemetry (opt-in) or the VPS proxy's
+// server-truth /t/ai events. state.apiLive tracks the server pipeline alone.
 async function loadCaptured() {
   try {
     const ov = await api('/admin/stats/overview?days=0');
-    state.captured = (Number(ov.usage.tokens_in) + Number(ov.usage.tokens_out)) > 0;
-  } catch { state.captured = false; }
+    const u = ov.usage;
+    state.apiLive = Number(u.api_calls) > 0;
+    state.captured = (Number(u.tokens_in) + Number(u.tokens_out) +
+      Number(u.api_tokens_in) + Number(u.api_tokens_out)) > 0;
+  } catch { state.captured = false; state.apiLive = false; }
 }
 // Plain-language honesty banner: what's real vs. what still needs confirming.
 function renderOverviewBanner() {
   const el = $('#ovBanner'); if (!el) return;
   const notes = [];
+  if (!state.apiLive) notes.push('<b>Серверный учёт API-вызовов (302.AI)</b> ещё не прислал ни одного события. Он не зависит от клиентской телеметрии, но требует деплоя: секрет INGEST_KEY на воркере (wrangler secret put INGEST_KEY) и тот же ключ в /etc/smesh-proxy.env на VPS. После первого решения через прокси здесь появятся реальные вызовы.');
   if (!state.captured) notes.push('<b>Токены и расход на ИИ</b> помечены «unverified!» — они берутся из ответа провайдера, но пока не подтверждены живым запросом. Сделайте один solve или тест через расширение: как только здесь появятся ненулевые токены, метки исчезнут сами.');
   if (!fxRate()) notes.push('<b>Курс USD→RUB недоступен</b> — рублёвые эквиваленты показаны как «₽ —».');
   if (!notes.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
   el.style.display = '';
   el.innerHTML = `<div class="banner-title">Не подтверждено:</div>` + notes.map((n) => `<div class="banner-line">${n}</div>`).join('') +
-    `<div class="banner-real">Реальные и проверенные: выручка, покупки, устройства, браузеры, счётчики решений/тестов/ГДЗ, активность (DAU/WAU/MAU), предметы.</div>`;
+    `<div class="banner-real">Реальные и проверенные: выручка, покупки, устройства, браузеры, счётчики решений/тестов/ГДЗ, активность (DAU/WAU/MAU), предметы${state.apiLive ? ', API-вызовы 302.AI (серверный учёт)' : ''}.</div>`;
 }
 
 /* ---------- Overview ---------- */
@@ -313,12 +328,19 @@ async function loadOverview() {
 
   renderOverviewBanner();
   const u = data.usage, c = data.cost, r = data.revenue, rp = data.revenue_prev, up = data.usage_prev, d = data.devices;
-  const costRub = usd2rub(c.window_usd);
+  // Real owner spend = the server-observed 302.AI calls. Until that pipeline
+  // is live we fall back to the flagged client estimate rather than showing
+  // a confidently wrong $0.
+  const API_MSG = 'Серверный учёт вызовов 302.AI (VPS → /t/ai) ещё не прислал событий. Проверьте INGEST_KEY на воркере и VPS.';
+  const realCostUsd = state.apiLive ? u.api_cost_usd : c.window_usd;
+  const costRub = usd2rub(realCostUsd);
   const net = costRub == null ? null : (r.revenue_rub - costRub);
   renderKpis($('#ovKpis'), [
     { label: 'Выручка', value: rub(r.revenue_rub), accent: r.revenue_rub > 0, foot: `${int(r.paid)} оплат · ${deltaChip(r.revenue_rub, rp ? rp.revenue_rub : null) || 'реальные платежи'}`, icon: iconMoney() },
-    { label: 'Расход на ИИ', value: usd(c.window_usd), sub: rubEq(c.window_usd) == null ? '' : '≈ ' + rubEq(c.window_usd), foot: (deltaChip(c.window_usd, c.prev_usd, 'up_bad') || 'кредиты API') + costFlag(), icon: iconChip() },
-    { label: 'Чистыми', value: net == null ? '—' : rub(net), foot: net == null ? 'нужен курс $→₽' : (net >= 0 ? 'выручка − расход' : 'пока в минусе'), accent: net != null && net > 0 },
+    { label: 'API-вызовы (сервер)', value: int(u.api_calls), foot: state.apiLive ? `все реальные вызовы 302.AI · ${tokens(u.api_tokens_in + u.api_tokens_out)} токенов` : 'нет событий' + unvBadge(API_MSG), icon: iconChip() },
+    { label: 'Расход 302.AI (сервер)', value: usd(u.api_cost_usd), sub: rubEq(u.api_cost_usd) == null ? '' : '≈ ' + rubEq(u.api_cost_usd), foot: state.apiLive ? 'токены с сервера · $ по тарифам' : 'нет событий' + unvBadge(API_MSG) },
+    { label: 'Чистыми', value: net == null ? '—' : rub(net), foot: net == null ? 'нужен курс $→₽' : `выручка − расход (${state.apiLive ? 'сервер' : 'оценка клиентов'})${net < 0 ? ' · пока в минусе' : ''}`, accent: net != null && net > 0 },
+    { label: 'Расход (оценка клиентов)', value: usd(c.window_usd), sub: rubEq(c.window_usd) == null ? '' : '≈ ' + rubEq(c.window_usd), foot: (deltaChip(c.window_usd, c.prev_usd, 'up_bad') || 'телеметрия, opt-in') + costFlag() },
     { label: 'Средний чек', value: r.avg_check_rub ? rub(r.avg_check_rub) : '—', foot: `${int(r.subscriptions)} подписок · ${int(r.lifetimes)} навсегда` },
     { label: 'Активные (MAU)', value: int(d.mau), foot: `DAU ${int(d.dau)} · WAU ${int(d.wau)}`, icon: iconUsers() },
     { label: 'Всего устройств', value: int(d.total), foot: `+${int(d.new_in_window)} за период` },
@@ -334,11 +356,20 @@ async function loadOverview() {
     labels,
     series: [
       { color: 'var(--green)', values: rows.map((x) => x.revenue_rub) },
-      { color: 'var(--warn)', values: rows.map((x) => (Number(x.cost_usd) || 0) * (rate || 0)) }
+      { color: 'var(--warn)', values: rows.map((x) => (Number(x.api_cost_usd) || 0) * (rate || 0)) },
+      { color: 'var(--tertiary)', values: rows.map((x) => (Number(x.cost_usd) || 0) * (rate || 0)), fill: false }
     ],
     fmt: (v) => v >= 1000 ? (v / 1000).toFixed(0) + 'k' : int(v)
   });
   lineChart($('#ovDauChart'), { labels, series: [{ color: 'var(--accent)', values: rows.map((x) => x.active) }] });
+
+  // Server-truth API-call volume (counted by the VPS, not by opt-in clients).
+  lineChart($('#ovApiChart'), { labels, series: [{ color: 'var(--warn)', values: rows.map((x) => x.api_calls) }] });
+  const apiCalls = rows.reduce((s, x) => s + (Number(x.api_calls) || 0), 0);
+  const apiCost = rows.reduce((s, x) => s + (Number(x.api_cost_usd) || 0), 0);
+  $('#ovApiNote').innerHTML = apiCalls > 0
+    ? `${int(apiCalls)} вызовов · ${usdDual(apiCost)}`
+    : `<span class="badge unverified" title="${esc(API_MSG)}">нет серверных событий</span>`;
   stackChart($('#ovUsageChart'), {
     labels,
     series: [
@@ -385,7 +416,7 @@ async function loadUsers() {
     body.innerHTML = data.users.map((x, i) => {
       const rank = u.offset + i + 1;
       const lic = x.license_type && x.license_type !== 'none'
-        ? `<span class="badge ${x.license_type === 'lifetime' ? 'lifetime' : 'sub'}">${LICENSE_LABEL[x.license_type] || x.license_type}</span>`
+        ? `<span class="badge ${x.license_type === 'lifetime' ? 'lifetime' : 'sub'}">${esc(LICENSE_LABEL[x.license_type] || x.license_type)}</span>`
         : `<span class="badge none">нет</span>`;
       return `<tr class="clickable" data-device="${esc(x.device_id)}">
         <td class="rank">${rank}</td>
@@ -442,7 +473,7 @@ async function loadMoney() {
   }).join('') : `<tr class="loading-row"><td colspan="6">Пока нет покупок за этот период.</td></tr>`;
 
   $('#gatewaysBox').innerHTML = data.gateways.length
-    ? propBars(data.gateways.map((g) => ({ label: esc(g.gateway), value: g.revenue_rub || g.n, display: g.revenue_rub ? rub(g.revenue_rub) : int(g.n) + ' шт' })))
+    ? propBars(data.gateways.map((g) => ({ label: g.gateway, value: g.revenue_rub || g.n, display: g.revenue_rub ? rub(g.revenue_rub) : int(g.n) + ' шт' })))
     : emptyChart();
 
   $('#referralsBox').innerHTML = `
@@ -561,7 +592,9 @@ async function openUser(deviceId) {
   bodyEl.innerHTML = `
     <div class="mini-kpis">
       <div class="mini-kpi"><div class="l">Использований</div><div class="v">${int(lt.uses)}</div></div>
-      <div class="mini-kpi"><div class="l">Расход${costFlag()}</div><div class="v">${usd(lt.cost_usd)}</div>${(() => { const rr = rubEq(lt.cost_usd); return rr == null ? '' : `<div class="rub-eq">${rr}</div>`; })()}</div>
+      <div class="mini-kpi"><div class="l">API-вызовы (сервер)</div><div class="v">${int(lt.api_calls)}</div></div>
+      <div class="mini-kpi"><div class="l">Расход API (сервер)</div><div class="v">${usd(lt.api_cost_usd)}</div>${(() => { const rr = rubEq(lt.api_cost_usd); return rr == null ? '' : `<div class="rub-eq">${rr}</div>`; })()}</div>
+      <div class="mini-kpi"><div class="l">Оценка клиента${costFlag()}</div><div class="v">${usd(lt.cost_usd)}</div>${(() => { const rr = rubEq(lt.cost_usd); return rr == null ? '' : `<div class="rub-eq">${rr}</div>`; })()}</div>
       <div class="mini-kpi"><div class="l">Дней активн.</div><div class="v">${int(lt.active_days)}</div></div>
     </div>
     <dl class="kv">
@@ -576,13 +609,13 @@ async function openUser(deviceId) {
       <dt>Токенов всего</dt><dd>${tokens(lt.tokens)}</dd>
     </dl>
     ${daily.length ? `<div><div class="panel-sub" style="margin-bottom:6px">Использования по дням (60 дн)</div><div class="chart" id="drawerChart"></div></div>` : ''}
-    ${data.subjects.length ? `<div><div class="panel-sub" style="margin-bottom:6px">Предметы</div>${propBars(data.subjects.map((s) => ({ label: esc(s.subject), value: s.n })))}</div>` : ''}
+    ${data.subjects.length ? `<div><div class="panel-sub" style="margin-bottom:6px">Предметы</div>${propBars(data.subjects.map((s) => ({ label: s.subject, value: s.n })))}</div>` : ''}
     <div><div class="panel-sub" style="margin-bottom:6px">Последние события (${data.recent.length})</div><div class="ev-list">${
       data.recent.map((ev) => `<div class="ev-row"><div><span class="ev-type">${esc(EV_LABEL[ev.type] || ev.type)}</span>${ev.subject ? ' · ' + esc(ev.subject) : ''}${ev.cost_usd ? ' · ' + usd(ev.cost_usd) + (rubEq(ev.cost_usd) ? ' / ' + rubEq(ev.cost_usd) : '') : ''}</div><div class="ev-when">${fmtDateTime(ev.ts)}</div></div>`).join('')
     }</div></div>`;
   if (daily.length) lineChart($('#drawerChart'), { labels: dailyLabels, series: [{ color: 'var(--accent)', values: daily.map((x) => x.uses) }] });
 }
-const EV_LABEL = { solve: 'Решение', test_solve: 'Тест', test_requestion: 'Перерешать', gdz_pull: 'ГДЗ', heartbeat: 'Активность', install: 'Установка', update: 'Обновление', error: 'Ошибка' };
+const EV_LABEL = { solve: 'Решение', test_solve: 'Тест', test_requestion: 'Перерешать', gdz_pull: 'ГДЗ', heartbeat: 'Активность', install: 'Установка', update: 'Обновление', error: 'Ошибка', ai_call: 'API-вызов (сервер)' };
 function closeDrawer() { $('#drawer').classList.remove('open'); $('#drawerScrim').classList.remove('open'); $('#drawer').setAttribute('aria-hidden', 'true'); }
 
 /* ---------- helpers ---------- */
