@@ -1,5 +1,6 @@
 /* СМЭШ AI admin dashboard — data + rendering. Static, no build, no deps.
-   Talks to the license worker's /admin/stats/* endpoints with an admin token. */
+   Talks to the license worker's /admin/stats/* endpoints with the read-only
+   stats token. */
 
 'use strict';
 
@@ -8,16 +9,31 @@
 // suffix is DPI-blocked in RU anyway. The worker allows this dashboard's
 // origin (and only it) on /admin/stats/* — see statsCors in worker.js.
 const API_BASE = 'https://smeshapi.site';
-// AI spend is billed in USD; revenue is in RUB. The USD→RUB rate is fetched
-// LIVE from exchangerate-api.com via the worker (the API key stays a server
-// secret) — never a hardcoded guess. See loadRate() / fxRate().
+// AI spend is billed in USD; revenue is in RUB. The USD→RUB rate is the
+// official Central Bank of Russia rate, fetched via the worker (keyless,
+// cbr-xml-daily.ru) — never a hardcoded guess. See loadRate() / fxRate().
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
 /* ------------------------------- auth -------------------------------- */
 
-const TOKEN_KEY = 'smesh_admin_token';
+// The dashboard's credential is STATS_SECRET, sent as X-Stats-Token: a
+// read-only capability that can reach /admin/stats/* and nothing else.
+//
+// It is NOT ADMIN_SECRET. The worker rejects any request carrying an Origin on
+// the issue/revoke/backfill routes, and its stats preflight allows exactly
+// `Content-Type, X-Stats-Token`. Sending x-admin-token therefore failed the
+// preflight and the browser reported "Failed to fetch" — a blocked request,
+// never a wrong password, which is why the stored key appeared to stop working.
+const TOKEN_HEADER = 'x-stats-token';
+const TOKEN_KEY = 'smesh_stats_token';
+// The pre-split key held ADMIN_SECRET. It is useless here now and is a
+// full-privilege credential sitting in browser storage, so drop it on sight.
+const LEGACY_TOKEN_KEY = 'smesh_admin_token';
+localStorage.removeItem(LEGACY_TOKEN_KEY);
+sessionStorage.removeItem(LEGACY_TOKEN_KEY);
+
 let token = localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || '';
 
 function saveToken(t, remember) {
@@ -30,17 +46,19 @@ function clearToken() {
   sessionStorage.removeItem(TOKEN_KEY);
 }
 
+// A fetch() that rejects never reached the worker: DNS, TLS, offline, or a
+// refused CORS preflight. Surfacing the raw "Failed to fetch" made a blocked
+// request look like a bad key, so name what it actually is.
+const NETWORK_MSG = `нет ответа от ${API_BASE} (сеть, деплой воркера или CORS)`;
+
 async function api(path) {
-  const res = await fetch(API_BASE + path, { headers: { 'x-admin-token': token } });
+  let res;
+  try { res = await fetch(API_BASE + path, { headers: { [TOKEN_HEADER]: token } }); }
+  catch { throw new Error(NETWORK_MSG); }
   if (res.status === 401) { logout(); throw new Error('unauthorized'); }
   const data = await res.json().catch(() => ({ ok: false, reason: 'bad_json' }));
   if (!res.ok || data.ok === false) throw new Error(data.reason || ('http_' + res.status));
   return data;
-}
-async function apiPost(path) {
-  const res = await fetch(API_BASE + path, { method: 'POST', headers: { 'x-admin-token': token } });
-  if (res.status === 401) { logout(); throw new Error('unauthorized'); }
-  return res.json().catch(() => ({ ok: false }));
 }
 
 /* ---------------------------- formatting ----------------------------- */
@@ -96,6 +114,15 @@ const unvBadge = (msg = CAPTURE_MSG) => ` <span class="badge unverified" title="
 const costFlag = () => (state.captured ? '' : unvBadge());
 // A muted "projection" tag for extrapolated (not measured) numbers.
 const projTag = ' <span class="proj-tag" title="Проекция: рассчитано из имеющихся данных, не измерено напрямую">проекция</span>';
+// Telemetry is opt-in and OFF by default (settings.js: telemetryEnabled = false),
+// and the VPS proxy reports server-side usage only for the same opt-in
+// (backend-vps/server.js: job.telemetryOptIn !== true → no /t/ai event). So the
+// devices table holds only the students who switched it on: every event in it
+// is real, but the totals are a floor, never the whole audience. Money and bot
+// data have no such filter. Anything counted from devices/events carries this.
+const SAMPLE_MSG = 'Считается только по тем, кто включил телеметрию в настройках (по умолчанию выключена). ' +
+  'События настоящие, но это нижняя граница: реальных установок и решений больше.';
+const sampleTag = ` <span class="proj-tag" title="${SAMPLE_MSG}">выборка</span>`;
 
 function fmtDate(ms) {
   if (!ms) return '—';
@@ -267,7 +294,7 @@ function toast(msg) {
 
 const state = {
   view: 'overview',
-  range: { overview: 7, users: 30, money: 30, subjects: 30, retention: 0, errors: 30 },
+  range: { overview: 7, users: 30, money: 30, subjects: 30, retention: 0, feedback: 30, errors: 30 },
   users: { sort: 'cost', browser: '', license: '', q: '', offset: 0, limit: 50 },
   loaded: {},
   rate: { ok: false, rate: null, fetched_at: null, stale: true }, // live USD→RUB
@@ -289,8 +316,8 @@ function renderRateChip() {
     return;
   }
   const stale = !!state.rate.stale;
-  el.innerHTML = `1&nbsp;$ = <b>${state.rate.rate.toFixed(2)}&nbsp;₽</b> <span class="rate-src${stale ? ' stale' : ''}">${stale ? 'кэш' : 'live'}</span>`;
-  el.title = 'Курс exchangerate-api · обновлён ' + fmtDateTime(Date.parse(state.rate.fetched_at));
+  el.innerHTML = `1&nbsp;$ = <b>${state.rate.rate.toFixed(2)}&nbsp;₽</b> <span class="rate-src${stale ? ' stale' : ''}">${stale ? 'кэш' : 'ЦБ'}</span>`;
+  el.title = 'Официальный курс ЦБ РФ · обновлён ' + fmtDateTime(Date.parse(state.rate.fetched_at));
 }
 // "Is the token/cost capture proven?" — true once any real usage exists
 // all-time, on EITHER pipeline: client telemetry (opt-in) or the VPS proxy's
@@ -311,10 +338,16 @@ function renderOverviewBanner() {
   if (!state.apiLive) notes.push('<b>Серверный учёт API-вызовов (302.AI)</b> ещё не прислал ни одного события. Он не зависит от клиентской телеметрии, но требует деплоя: секрет INGEST_KEY на воркере (wrangler secret put INGEST_KEY) и тот же ключ в /etc/smesh-proxy.env на VPS. После первого решения через прокси здесь появятся реальные вызовы.');
   if (!state.captured) notes.push('<b>Токены и расход на ИИ</b> помечены «unverified!» — они берутся из ответа провайдера, но пока не подтверждены живым запросом. Сделайте один solve или тест через расширение: как только здесь появятся ненулевые токены, метки исчезнут сами.');
   if (!fxRate()) notes.push('<b>Курс USD→RUB недоступен</b> — рублёвые эквиваленты показаны как «₽ —».');
-  if (!notes.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  // Two different kinds of caveat, kept apart on purpose. The notes above clear
+  // themselves once a pipeline proves itself; the coverage line below never
+  // does — it is the permanent difference between "all buyers" and "everyone
+  // who opted into telemetry", and hiding it is what would make these numbers
+  // look like a full picture when they are a floor.
+  const coverage =
+    `<div class="banner-real">Полные данные, по всем: выручка, возвраты, покупки, рефералы, бот и отзывы — они пишутся сервером на каждое событие.</div>` +
+    `<div class="banner-line">Выборка (только включившие телеметрию, по умолчанию она выключена): устройства, браузеры, DAU/WAU/MAU, решения/тесты/ГДЗ, предметы, удержание, ошибки${state.apiLive ? ', API-вызовы 302.AI' : ''}. Цифры настоящие, но это нижняя граница — реальных пользователей больше.</div>`;
   el.style.display = '';
-  el.innerHTML = `<div class="banner-title">Не подтверждено:</div>` + notes.map((n) => `<div class="banner-line">${n}</div>`).join('') +
-    `<div class="banner-real">Реальные и проверенные: выручка, покупки, устройства, браузеры, счётчики решений/тестов/ГДЗ, активность (DAU/WAU/MAU), предметы${state.apiLive ? ', API-вызовы 302.AI (серверный учёт)' : ''}.</div>`;
+  el.innerHTML = (notes.length ? `<div class="banner-title">Не подтверждено:</div>` + notes.map((n) => `<div class="banner-line">${n}</div>`).join('') : '') + coverage;
 }
 
 /* ---------- Overview ---------- */
@@ -334,17 +367,20 @@ async function loadOverview() {
   const API_MSG = 'Серверный учёт вызовов 302.AI (VPS → /t/ai) ещё не прислал событий. Проверьте INGEST_KEY на воркере и VPS.';
   const realCostUsd = state.apiLive ? u.api_cost_usd : c.window_usd;
   const costRub = usd2rub(realCostUsd);
-  const net = costRub == null ? null : (r.revenue_rub - costRub);
+  // Profit starts from money actually kept: gross minus refunds settled in the
+  // same window. Falls back to gross only when refunds could not be read.
+  const keptRub = r.net_revenue_rub == null ? r.revenue_rub : r.net_revenue_rub;
+  const net = costRub == null ? null : (keptRub - costRub);
   renderKpis($('#ovKpis'), [
-    { label: 'Выручка', value: rub(r.revenue_rub), accent: r.revenue_rub > 0, foot: `${int(r.paid)} оплат · ${deltaChip(r.revenue_rub, rp ? rp.revenue_rub : null) || 'реальные платежи'}`, icon: iconMoney() },
+    { label: 'Выручка', value: rub(r.revenue_rub), accent: r.revenue_rub > 0, foot: `${int(r.paid)} оплат · ${r.refunds ? `−${rub(r.refunded_rub)} возвраты` : (deltaChip(r.revenue_rub, rp ? rp.revenue_rub : null) || 'реальные платежи')}`, icon: iconMoney() },
     { label: 'API-вызовы (сервер)', value: int(u.api_calls), foot: state.apiLive ? `все реальные вызовы 302.AI · ${tokens(u.api_tokens_in + u.api_tokens_out)} токенов` : 'нет событий' + unvBadge(API_MSG), icon: iconChip() },
     { label: 'Расход 302.AI (сервер)', value: usd(u.api_cost_usd), sub: rubEq(u.api_cost_usd) == null ? '' : '≈ ' + rubEq(u.api_cost_usd), foot: state.apiLive ? 'токены с сервера · $ по тарифам' : 'нет событий' + unvBadge(API_MSG) },
-    { label: 'Чистыми', value: net == null ? '—' : rub(net), foot: net == null ? 'нужен курс $→₽' : `выручка − расход (${state.apiLive ? 'сервер' : 'оценка клиентов'})${net < 0 ? ' · пока в минусе' : ''}`, accent: net != null && net > 0 },
+    { label: 'Чистыми', value: net == null ? '—' : rub(net), foot: net == null ? 'нужен курс $→₽' : `выручка${r.refunds ? ' − возвраты' : ''} − расход (${state.apiLive ? 'сервер' : 'оценка клиентов'})${net < 0 ? ' · пока в минусе' : ''}`, accent: net != null && net > 0 },
     { label: 'Расход (оценка клиентов)', value: usd(c.window_usd), sub: rubEq(c.window_usd) == null ? '' : '≈ ' + rubEq(c.window_usd), foot: (deltaChip(c.window_usd, c.prev_usd, 'up_bad') || 'телеметрия, opt-in') + costFlag() },
     { label: 'Средний чек', value: r.avg_check_rub ? rub(r.avg_check_rub) : '—', foot: `${int(r.subscriptions)} подписок · ${int(r.lifetimes)} навсегда` },
-    { label: 'Активные (MAU)', value: int(d.mau), foot: `DAU ${int(d.dau)} · WAU ${int(d.wau)}`, icon: iconUsers() },
-    { label: 'Всего устройств', value: int(d.total), foot: `+${int(d.new_in_window)} за период` },
-    { label: 'Решений', value: int(u.solves), foot: `${deltaChip(u.solves, up ? up.solves : null) || 'за период'} · ${int(u.tests)} тестов · ${int(u.gdz)} ГДЗ` },
+    { label: 'Активные (MAU)', value: int(d.mau), foot: `DAU ${int(d.dau)} · WAU ${int(d.wau)}${sampleTag}`, icon: iconUsers() },
+    { label: 'Устройств с телеметрией', value: int(d.total), foot: `+${int(d.new_in_window)} за период${sampleTag}` },
+    { label: 'Решений', value: int(u.solves), foot: `${deltaChip(u.solves, up ? up.solves : null) || 'за период'} · ${int(u.tests)} тестов · ${int(u.gdz)} ГДЗ${sampleTag}` },
     { label: 'Расход на юзера', value: usd(c.per_active_user_usd), sub: rubEq(c.per_active_user_usd) == null ? '' : '≈ ' + rubEq(c.per_active_user_usd), foot: `в день ${usd(c.per_user_day_usd)} · мес ${usd(c.per_user_month_usd)}${projTag}${costFlag()}` }
   ]);
 
@@ -442,6 +478,17 @@ async function loadUsers() {
 }
 
 /* ---------- Money ---------- */
+// Refunds are counted on the day the money went back, so a refund of an older
+// purchase lands in this window while its sale does not — the same convention
+// an accounting period uses.
+function refundFoot(s) {
+  if (!s.refunds_known) {
+    return 'возвраты не прочитаны' + unvBadge('Таблица payment_orders недоступна: показана только валовая выручка, вычесть возвраты не из чего.');
+  }
+  if (!s.refunds) return 'возвратов за период не было';
+  return `−${rub(s.refunded_rub)} · ${int(s.refunds)} возврат(ов) в этом периоде`;
+}
+
 async function loadMoney() {
   const days = state.range.money;
   $('#moneyKpis').innerHTML = skeletonKpis(4);
@@ -449,10 +496,15 @@ async function loadMoney() {
   try { [data, refs] = await Promise.all([api(`/admin/stats/purchases?days=${days}`), api('/admin/stats/referrals')]); }
   catch (e) { $('#moneyKpis').innerHTML = errBox(e); return; }
   const s = data.summary;
+  // Gross is what was charged; net subtracts refunds that actually settled in
+  // the same period. A revoked key is NOT a refund — it can be revoked for
+  // abuse with the money kept, or refunded from an order that was never
+  // revoked — so the two are shown as the separate facts they are.
   renderKpis($('#moneyKpis'), [
-    { label: 'Выручка за период', value: rub(s.revenue_rub), accent: true, foot: `${int(s.paid)} оплаченных ключей`, icon: iconMoney() },
+    { label: 'Выручка за период', value: rub(s.revenue_rub), accent: true, foot: `${int(s.paid)} оплаченных ключей · до возвратов`, icon: iconMoney() },
+    { label: 'Чистыми после возвратов', value: s.net_revenue_rub == null ? '—' : rub(s.net_revenue_rub), foot: refundFoot(s) },
     { label: 'Средний чек', value: s.avg_check_rub ? rub(s.avg_check_rub) : '—', foot: `${int(s.subscriptions)} подписок · ${int(s.lifetimes)} навсегда` },
-    { label: 'Возвраты/отзывы', value: int(s.revoked), foot: `${int(s.preorders)} предзаказов` },
+    { label: 'Отозвано ключей', value: int(s.revoked), foot: `${int(s.preorders)} предзаказов · отзыв ≠ возврат денег` },
     { label: 'Реф. награды', value: int(s.referral_rewards), foot: `${int(refs.total_referred_purchases)} покупок по кодам` }
   ]);
 
@@ -573,6 +625,134 @@ async function loadErrors() {
   }).join('');
 }
 
+/* ---------- Feedback & bot ---------- */
+// Labels mirror delivery/subscription.js: STAGE_OFFSETS and WINBACK_REASONS.
+const STAGE_LABEL = {
+  expiry_3d: 'Напоминание за 3 дня',
+  expiry_1d: 'Напоминание за 1 день',
+  expired: 'Подписка закончилась',
+  winback: 'Опрос через 3 дня'
+};
+const REASON_LABEL = {
+  price: '💸 Дорого',
+  unused: '🤷 Не пригодилось',
+  quality: '😕 Ответы не устроили',
+  bugs: '🐞 Ошибки и глюки',
+  alternative: '🔀 Пользуюсь другим',
+  other: '✍️ Другое (написали текстом)'
+};
+// telegram_updates.result_kind — what the handler decided for each update.
+const KIND_LABEL = {
+  submit_ticket: 'Обращение в поддержку',
+  submit_feature: 'Предложили идею',
+  sub_winback_text: 'Ответ на опрос текстом',
+  sub_winback_choice: 'Ответ на опрос кнопкой',
+  sub_card: 'Открыли /sub',
+  sub_bind: 'Привязали ключ',
+  sub_bind_prompt: 'Начали привязку ключа',
+  sub_release: 'Отвязали устройство',
+  sub_release_confirm: 'Подтверждение отвязки',
+  sub_callback_ignored: 'Устаревшая кнопка',
+  callback_ticket: 'Кнопка «обращение»',
+  callback_feature: 'Кнопка «идея»',
+  callback_unknown: 'Неизвестная кнопка',
+  resolve: 'Закрыли своё обращение',
+  owner_reply: 'Мой ответ пользователю',
+  owner_reply_replay: 'Мой ответ (повтор)',
+  owner_menu: 'Моё меню',
+  start_menu: 'Открыли меню',
+  start_support: 'Меню → поддержка',
+  help: 'Команда /help',
+  rate_limited: 'Сработал лимит частоты',
+  service_unavailable: 'Сбой сервиса',
+  ignored: 'Не по теме',
+  incomplete: 'Не завершено (сбой/лизинг)'
+};
+const MODE_LABEL = { ticket: 'Обращение', feature: 'Идея', winback: 'Ушёл — почему' };
+const SOURCE_LABEL = {
+  reminders: 'напоминания', winback: 'ответы опроса', links: 'привязки Telegram',
+  updates: 'действия в боте', support: 'очередь поддержки', coverage: 'глубина истории'
+};
+
+async function loadFeedback() {
+  const days = state.range.feedback;
+  $('#fbKpis').innerHTML = skeletonKpis(6);
+  let data, tickets;
+  try {
+    [data, tickets] = await Promise.all([
+      api(`/admin/stats/feedback?days=${days}`),
+      api('/admin/stats/tickets?limit=60')
+    ]);
+  } catch (e) { $('#fbKpis').innerHTML = errBox(e); return; }
+
+  const r = data.reminders, w = data.winback, tg = data.telegram, sup = data.support;
+  const sentAll = r.expiry_3d.sent + r.expiry_1d.sent + r.expired.sent + r.winback.sent;
+  const savedAll = r.expiry_3d.cancelled + r.expiry_1d.cancelled;
+  const stalledAll = r.expiry_3d.stalled + r.expiry_1d.stalled + r.expired.stalled + r.winback.stalled;
+
+  renderKpis($('#fbKpis'), [
+    { label: 'Привязано Telegram', value: int(tg.linked_total), foot: `+${int(tg.linked_in_window)} за период · доступ к /sub`, icon: iconUsers() },
+    { label: 'Отправлено сообщений', value: int(sentAll), foot: 'напоминания, финал и опрос', accent: sentAll > 0 },
+    // A reminder is cancelled when the key stopped needing it before the send.
+    { label: 'Продлили до напоминания', value: int(savedAll), foot: 'напоминание отменено — подписка уже продлена' },
+    { label: 'Ответов на опрос', value: int(w.answered), sub: w.response_rate == null ? '' : pct(w.response_rate), foot: w.sent ? `из ${int(w.sent)} отправленных опросов` : 'опросы ещё не уходили' },
+    { label: 'Сообщений от людей', value: int(sup.total), foot: `${int(sup.forwarded)} доставлено мне${sup.pending ? ' · ' + int(sup.pending) + ' в очереди' : ''}` },
+    { label: 'Застряло в отправке', value: int(stalledAll + sup.exhausted), foot: stalledAll + sup.exhausted > 0 ? 'исчерпаны попытки — нужен разбор' : 'очереди чистые', accent: false }
+  ]);
+
+  // Honesty line: what these numbers cover and what could not be read.
+  const notes = [];
+  if (data.unavailable && data.unavailable.length) {
+    notes.push(`<b>Не прочитано:</b> ${data.unavailable.map((s) => esc(SOURCE_LABEL[s] || s)).join(', ')}. Эти блоки показывают нули потому, что таблица недоступна (миграция не применена), а не потому, что событий не было.`);
+  }
+  const cov = data.coverage || {};
+  if (cov.oldest_update_at) {
+    notes.push(`<b>Действия в боте</b> хранятся 7 дней (потом чистятся). Самая старая запись: ${fmtDateTime(cov.oldest_update_at)} — за более длинный период это не полная картина.`);
+  }
+  if (cov.oldest_notification_at) {
+    notes.push(`Напоминания и опросы хранятся 365 дней. Самая старая запись: ${fmtDateTime(cov.oldest_notification_at)}.`);
+  }
+  if (tickets.truncated) notes.push('Список сообщений обрезан по лимиту сканирования KV.');
+  const fbNote = $('#fbNote');
+  fbNote.style.display = notes.length ? '' : 'none';
+  fbNote.innerHTML = notes.map((n) => `<div class="banner-line">${n}</div>`).join('');
+
+  // Lifecycle funnel — one row per stage, in the order they fire.
+  $('#fbStages').innerHTML = ['expiry_3d', 'expiry_1d', 'expired', 'winback'].map((s) => {
+    const v = r[s];
+    return `<tr>
+      <td>${esc(STAGE_LABEL[s])}</td>
+      <td class="num">${int(v.queued)}</td>
+      <td class="num">${int(v.sent)}</td>
+      <td class="num">${int(v.cancelled)}</td>
+      <td class="num">${int(v.pending)}</td>
+      <td class="num">${v.stalled ? `<span class="badge unverified">${int(v.stalled)}</span>` : '0'}</td>
+    </tr>`;
+  }).join('');
+
+  $('#fbReasons').innerHTML = w.reasons.length
+    ? propBars(w.reasons.map((x) => ({ label: REASON_LABEL[x.code] || x.code, value: x.n })), { total: w.answered })
+    : `<div class="empty-state">${w.sent ? 'Опросы отправлены, ответов пока нет.' : 'Опрос ещё никому не уходил.'}</div>`;
+
+  $('#fbKinds').innerHTML = tg.updates.length
+    ? propBars(tg.updates.map((x) => ({ label: KIND_LABEL[x.kind] || x.kind, value: x.n })), { total: tg.updates_total })
+    : `<div class="empty-state">За период бот не обработал ни одного обновления.</div>`;
+
+  const body = $('#fbTicketsBody');
+  $('#fbTicketsCount').textContent = tickets.tickets.length
+    ? `${tickets.tickets.length} из ${int(tickets.total_retained)} · открытых ${int(tickets.counts.open)}`
+    : '';
+  body.innerHTML = tickets.tickets.length
+    ? tickets.tickets.map((t) => `<tr>
+        <td class="mono">#${esc(t.no)}</td>
+        <td><span class="badge ${t.mode === 'winback' ? 'unverified' : ''}">${esc(MODE_LABEL[t.mode] || t.mode)}</span></td>
+        <td class="muted" style="white-space:nowrap">${t.at ? fmtDateTime(Date.parse(t.at)) : '—'}</td>
+        <td>${esc(t.text)}</td>
+        <td>${t.status === 'resolved' ? 'закрыто' : 'открыто'}</td>
+      </tr>`).join('')
+    : `<tr class="loading-row"><td colspan="5">Сообщений пока нет. Тексты хранятся 90 дней.</td></tr>`;
+}
+
 /* ---------- User drawer ---------- */
 async function openUser(deviceId) {
   const drawer = $('#drawer'), scrim = $('#drawerScrim'), bodyEl = $('#drawerBody');
@@ -625,7 +805,7 @@ function iconMoney() { return `<svg viewBox="0 0 24 24" fill="none" stroke="curr
 function iconChip() { return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>`; }
 function iconUsers() { return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>`; }
 
-const LOADERS = { overview: loadOverview, users: loadUsers, money: loadMoney, subjects: loadSubjects, retention: loadRetention, errors: loadErrors };
+const LOADERS = { overview: loadOverview, users: loadUsers, money: loadMoney, subjects: loadSubjects, retention: loadRetention, feedback: loadFeedback, errors: loadErrors };
 function showView(view, force) {
   state.view = view;
   $$('.nav-btn').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
@@ -672,13 +852,10 @@ function bindChrome() {
   $('#drawerClose').addEventListener('click', closeDrawer);
   $('#drawerScrim').addEventListener('click', closeDrawer);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
-  // sync + logout
-  $('#syncBtn').addEventListener('click', async () => {
-    toast('Синхронизирую…');
-    const r = await apiPost('/admin/backfill-licenses');
-    toast(r.ok ? `Готово: ${r.imported} лицензий` : 'Ошибка синхронизации');
-    if (r.ok) { reload('money'); reload('overview'); }
-  });
+  // Licence sync (POST /admin/backfill-licenses) is not here any more: it is an
+  // ADMIN_SECRET route, and the worker refuses every admin request that carries
+  // a browser Origin. It is a curl command from the machine that holds the
+  // admin key — see README.
   $('#logoutBtn').addEventListener('click', logout);
 }
 
@@ -692,8 +869,17 @@ async function enterApp() {
 function logout() { clearToken(); $('#shell').hidden = true; $('#gate').style.display = 'grid'; $('#tokenInput').value = ''; }
 
 async function tryToken(t, remember) {
-  const probe = await fetch(API_BASE + '/admin/stats/overview?days=1', { headers: { 'x-admin-token': t } });
-  if (probe.status === 401) throw new Error('Неверный ключ.');
+  let probe;
+  try {
+    probe = await fetch(API_BASE + '/admin/stats/overview?days=1', { headers: { [TOKEN_HEADER]: t } });
+  } catch {
+    throw new Error(`Нет соединения с ${API_BASE}. Проверьте сеть и что воркер задеплоен.`);
+  }
+  if (probe.status === 401) throw new Error('Неверный ключ. Нужен STATS_SECRET (не ADMIN_SECRET).');
+  // The worker caps failed attempts per IP per day in the same budget table
+  // telemetry uses; say so instead of showing a bare status code.
+  if (probe.status === 429) throw new Error('Слишком много попыток за сегодня — лимит воркера. Попробуйте завтра.');
+  if (probe.status === 503) throw new Error('Сервер в режиме обслуживания или без D1 (503).');
   if (!probe.ok) throw new Error('Сервер недоступен (' + probe.status + ').');
   saveToken(t, remember);
   enterApp();
