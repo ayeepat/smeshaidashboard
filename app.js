@@ -875,7 +875,13 @@ async function tryToken(t, remember) {
   } catch {
     throw new Error(`Нет соединения с ${API_BASE}. Проверьте сеть и что воркер задеплоен.`);
   }
-  if (probe.status === 401) throw new Error('Неверный ключ. Нужен STATS_SECRET (не ADMIN_SECRET).');
+  // A 401 has two indistinguishable causes from out here: the key is wrong, or
+  // STATS_SECRET was never set on the worker (statsGuard returns false when it
+  // is missing or shorter than 32 chars, so even a correct key fails). Name
+  // both — the second one is not fixable by retyping anything.
+  if (probe.status === 401) {
+    throw new Error('Ключ отклонён. Нужен STATS_SECRET, не ADMIN_SECRET — и он должен быть задан на воркере: npx wrangler secret put STATS_SECRET');
+  }
   // The worker caps failed attempts per IP per day in the same budget table
   // telemetry uses; say so instead of showing a bare status code.
   if (probe.status === 429) throw new Error('Слишком много попыток за сегодня — лимит воркера. Попробуйте завтра.');

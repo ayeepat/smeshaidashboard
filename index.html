@@ -7,7 +7,11 @@
   <meta name="description" content="Внутренняя панель аналитики СМЭШ AI: выручка, расход на ИИ, удержание и пользователи." />
   <meta name="robots" content="noindex, nofollow" />
   <link rel="icon" type="image/png" href="assets/favicon-32.png" />
-  <link rel="stylesheet" href="styles.css" />
+  <!-- GitHub Pages serves these with cache-control: max-age=600, so a browser
+       that has been here before keeps running the previous build for up to ten
+       minutes after a push — a deploy then looks like it changed nothing. Bump
+       ?v= in BOTH refs whenever app.js or styles.css changes. -->
+  <link rel="stylesheet" href="styles.css?v=2" />
 </head>
 <body>
   <!-- ============ Login gate ============ -->
@@ -392,6 +396,6 @@
 
   <div class="toast" id="toast"></div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=2"></script>
 </body>
 </html>
