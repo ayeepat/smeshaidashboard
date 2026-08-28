@@ -470,6 +470,7 @@ tr.row-alert td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
 .model-grid { display: grid; gap: 14px; }
 .model-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .model-grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.model-grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .route-stack { display: flex; flex-direction: column; gap: 12px; }
 .route-row { margin: 0; padding: 14px 15px 15px; border: 1px solid var(--separator); border-radius: var(--r-md); }
 .route-row legend { padding: 0 7px; font-family: var(--font-display); font-size: 13px; font-weight: 700; }
@@ -501,7 +502,7 @@ code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-si
   .sidebar-foot { margin: 0; flex-direction: row; align-items: center; }
   .side-meta { display: none; }
   .content { width: 100%; min-width: 0; padding: 22px 16px 60px; overflow: hidden; }
-  .model-auth, .model-grid.two, .model-grid.three, .save-panel { grid-template-columns: 1fr; }
+  .model-auth, .model-grid.two, .model-grid.three, .model-grid.four, .save-panel { grid-template-columns: 1fr; }
   .inline-field, .emergency-panel, .history-row { align-items: stretch; flex-direction: column; }
   .model-statebar { grid-template-columns: 1fr 1fr; }
   .model-statebar .draft-state { min-width: 0; }

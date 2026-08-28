@@ -12,7 +12,7 @@
        that has been here before keeps running the previous build for up to ten
        minutes after a push — a deploy then looks like it changed nothing. Bump
        ?v= in BOTH refs whenever app.js or styles.css changes. -->
-  <link rel="stylesheet" href="styles.css?v=5" />
+  <link rel="stylesheet" href="styles.css?v=6" />
 </head>
 <body>
   <!-- ============ Login gate ============ -->
@@ -471,10 +471,11 @@
           </section>
 
           <section class="panel">
-            <div class="panel-head-row"><h3>Дневные лимиты</h3><span class="muted">на лицензию · московское время</span></div>
-            <div class="model-grid three">
+            <div class="panel-head-row"><h3>Лимиты запросов</h3><span class="muted">на лицензию · день по московскому времени</span></div>
+            <div class="model-grid four">
+              <div class="field"><label for="minuteLimit">Запросов в минуту</label><input id="minuteLimit" type="number" min="1" max="60" step="1" /><small>Общий скользящий лимит для Auto, Think и дешёвой цепочки. Отклонённые запросы не тратят дневной лимит.</small></div>
               <div class="field"><label for="frontierLimit">Frontier-запросов</label><input id="frontierLimit" type="number" min="0" max="5000" step="1" /><small>Общий лимит Auto + Think. После него включается дешёвая цепочка.</small></div>
-              <div class="field"><label for="standardLimit">Дешёвых запросов</label><input id="standardLimit" type="number" min="1" max="10000" step="1" /><small>Защита от бесконечного использования после frontier-лимита.</small></div>
+              <div class="field"><label for="standardLimit">Дешёвых запросов</label><input id="standardLimit" type="number" min="1" max="10000" step="1" /><small>Отдельный дневной запас после frontier-лимита. При 15 + 70 пользователь получает до 85 запросов.</small></div>
               <div class="field"><label for="globalLimit">Глобально в день</label><input id="globalLimit" type="number" min="1" max="100000" step="1" /><small>Последний предохранитель для всех лицензий вместе.</small></div>
             </div>
           </section>
@@ -553,6 +554,6 @@
 
   <div class="toast" id="toast"></div>
 
-  <script src="app.js?v=4"></script>
+  <script src="app.js?v=5"></script>
 </body>
 </html>

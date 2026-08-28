@@ -1057,6 +1057,7 @@ function readModelForm() {
   }
   return {
     limits: {
+      requests_per_minute: Number($('#minuteLimit').value),
       frontier_per_license: Number($('#frontierLimit').value),
       standard_per_license: Number($('#standardLimit').value),
       global_daily: Number($('#globalLimit').value),
@@ -1132,6 +1133,7 @@ function renderModelState(data) {
     : '';
 
   const { limits, routes, rates } = data.config;
+  $('#minuteLimit').value = limits.requests_per_minute;
   $('#frontierLimit').value = limits.frontier_per_license;
   $('#standardLimit').value = limits.standard_per_license;
   $('#globalLimit').value = limits.global_daily;
