@@ -9,6 +9,7 @@
 // suffix is DPI-blocked in RU anyway. The worker allows this dashboard's
 // origin (and only it) on /admin/stats/* — see statsCors in worker.js.
 const API_BASE = 'https://smeshapi.site';
+const MODEL_API_BASE = 'https://ai.smeshapi.site';
 // AI spend is billed in USD; revenue is in RUB. The USD→RUB rate is the
 // official Central Bank of Russia rate, fetched via the worker (keyless,
 // cbr-xml-daily.ru) — never a hardcoded guess. See loadRate() / fxRate().
@@ -28,6 +29,7 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 // never a wrong password, which is why the stored key appeared to stop working.
 const TOKEN_HEADER = 'x-stats-token';
 const TOKEN_KEY = 'smesh_stats_token';
+const MODEL_TOKEN_KEY = 'smesh_model_admin_token';
 // The pre-split key held ADMIN_SECRET. It is useless here now and is a
 // full-privilege credential sitting in browser storage, so drop it on sight.
 const LEGACY_TOKEN_KEY = 'smesh_admin_token';
@@ -35,6 +37,7 @@ localStorage.removeItem(LEGACY_TOKEN_KEY);
 sessionStorage.removeItem(LEGACY_TOKEN_KEY);
 
 let token = localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || '';
+let modelToken = sessionStorage.getItem(MODEL_TOKEN_KEY) || '';
 
 function saveToken(t, remember) {
   token = t;
@@ -44,6 +47,15 @@ function clearToken() {
   token = '';
   localStorage.removeItem(TOKEN_KEY);
   sessionStorage.removeItem(TOKEN_KEY);
+}
+
+function saveModelToken(value) {
+  modelToken = value;
+  sessionStorage.setItem(MODEL_TOKEN_KEY, value);
+}
+function clearModelToken() {
+  modelToken = '';
+  sessionStorage.removeItem(MODEL_TOKEN_KEY);
 }
 
 // A fetch() that rejects never reached the worker: DNS, TLS, offline, or a
@@ -58,6 +70,28 @@ async function api(path) {
   if (res.status === 401) { logout(); throw new Error('unauthorized'); }
   const data = await res.json().catch(() => ({ ok: false, reason: 'bad_json' }));
   if (!res.ok || data.ok === false) throw new Error(data.reason || ('http_' + res.status));
+  return data;
+}
+
+async function modelApi(method, body) {
+  let res;
+  try {
+    res = await fetch(MODEL_API_BASE + '/admin/model-config', {
+      method,
+      headers: {
+        'X-Model-Admin-Key': modelToken,
+        ...(body ? { 'Content-Type': 'application/json' } : {})
+      },
+      body: body ? JSON.stringify(body) : undefined
+    });
+  } catch {
+    throw new Error(`Нет ответа от ${MODEL_API_BASE}. Проверьте VPS, CORS и MODEL_DASHBOARD_ORIGIN.`);
+  }
+  const data = await res.json().catch(() => ({ ok: false, reason: 'bad_json' }));
+  if (res.status === 401) throw Object.assign(new Error('MODEL_ADMIN_KEY отклонён.'), { code: 'unauthorized' });
+  if (res.status === 429) throw new Error('Слишком много неверных попыток. Подождите 10 минут.');
+  if (res.status === 409) throw Object.assign(new Error('Конфигурацию уже изменили в другой вкладке. Загружена свежая версия.'), { code: 'stale' });
+  if (!res.ok || data.ok === false) throw new Error(data.reason || ('VPS вернул ' + res.status));
   return data;
 }
 
@@ -299,7 +333,8 @@ const state = {
   loaded: {},
   rate: { ok: false, rate: null, fetched_at: null, stale: true }, // live USD→RUB
   captured: false, // has any real token/cost usage been recorded yet?
-  apiLive: false   // has the VPS server-truth pipeline (/t/ai) sent anything?
+  apiLive: false,  // has the VPS server-truth pipeline (/t/ai) sent anything?
+  models: { current: null, busy: false }
 };
 
 // Fetch the live USD→RUB rate (worker-proxied; key stays server-side) and paint
@@ -494,18 +529,34 @@ const WORKLIST_LABEL = {
   subscription_notify_exhausted: 'Напоминания не отправились'
 };
 
+// "Could not check" must never look like "nothing is stuck" — that is the one
+// mistake this strip cannot afford, and hiding it on any failure made exactly
+// that mistake. A 404 is the single honest exception: the route does not exist
+// yet on the deployed worker, so there is nothing to have failed.
+function showWorklistProbeFailure(el, detail) {
+  el.style.display = '';
+  el.className = 'banner ops-strip';
+  el.innerHTML = `<div class="banner-title">Очереди не проверены</div>
+    <div class="banner-line">Не удалось прочитать рабочие очереди. Это <b>не</b> значит, что всё чисто — значит, что проверить не вышло.${
+      detail ? ` <span class="muted">${esc(detail)}</span>` : ''}</div>`;
+}
+
 async function loadWorklists() {
   const el = $('#opsStrip');
   if (!el) return;
   let data;
   try { data = await api('/admin/stats/worklists'); }
-  catch { el.style.display = 'none'; return; }
+  catch (e) {
+    // Route absent = worker not deployed with this build yet. Anything else
+    // (network, CORS, 500, expired token) is a real failed check and is said so.
+    if (/http_404|not_found/.test(e.message)) el.style.display = 'none';
+    else showWorklistProbeFailure(el, e.message);
+    return;
+  }
 
+  // The worker's own probe failed inside collectWorklists().
   if (data.worklists === null) {
-    el.style.display = '';
-    el.className = 'banner ops-strip';
-    el.innerHTML = `<div class="banner-title">Очереди не проверены</div>
-      <div class="banner-line">Не удалось прочитать рабочие очереди. Это <b>не</b> значит, что всё чисто — значит, что проверить не вышло.</div>`;
+    showWorklistProbeFailure(el, '');
     return;
   }
   const stuck = Object.entries(data.worklists).filter(([, n]) => n > 0);
@@ -677,25 +728,45 @@ async function renderMargin(days) {
     $('#marginNote').textContent = '';
     return;
   }
-  const rate = fxRate();
+  // The proxy only reports AI calls for students who switched telemetry on, and
+  // it is off by default — so "no calls" means "not measured", not "free". The
+  // totals and the per-row margin below therefore cover the observed subset
+  // only; "N keys cost $X" over the whole page would understate spend by however
+  // many customers never opted in. A worker predating these fields reports
+  // nothing here, so fall back to treating the page as fully observed rather
+  // than claiming none of it is.
+  const unobserved = Number(m.unobserved) || 0;
+  const observedCount = m.observed == null ? m.customers.length : Number(m.observed) || 0;
+  const observedPaid = m.observed_paid_rub == null ? m.paid_rub : m.observed_paid_rub;
   const totalCostRub = usd2rub(m.api_cost_usd);
-  $('#marginNote').innerHTML = totalCostRub == null
+  const coverage = unobserved
+    ? ` · <b>${int(unobserved)}</b> без телеметрии — расход неизвестен`
+    : '';
+  $('#marginNote').innerHTML = (totalCostRub == null
     ? `${int(m.counted)} ключей · ${usd(m.api_cost_usd)} расхода`
-    : `${int(m.counted)} ключей · заплатили ${rub(m.paid_rub)} · стоили ${usdDual(m.api_cost_usd)}`;
+    : `${int(m.counted)} ключей · видно расход у ${int(observedCount)}: заплатили ${rub(observedPaid)} · стоили ${usdDual(m.api_cost_usd)}`
+  ) + coverage;
 
   body.innerHTML = m.customers.map((c) => {
-    const costRub = usd2rub(c.api_cost_usd);
+    // `cost_observed === false` is a customer the proxy never reported on.
+    // Rendering their cost as $0 made an unmeasured heavy user the single most
+    // profitable row on a panel whose whole job is finding loss-makers.
+    const observed = c.cost_observed !== false;
+    const costRub = observed ? usd2rub(c.api_cost_usd) : null;
     // Margin is only meaningful once the $→₽ rate is known; without it the
     // row shows the two figures and refuses to invent a comparison.
     const margin = costRub == null ? null : c.paid_rub - costRub;
     const bad = margin != null && margin < 0;
+    const unknown = '<span class="muted" title="Этот пользователь не включал телеметрию, поэтому его вызовы ИИ прокси не передаёт">—</span>';
     return `<tr${bad ? ' class="row-alert"' : ''}>
       <td class="mono">${esc(c.key_hint)}</td>
       <td>${c.type === 'lifetime' ? '<span class="badge lifetime">Навсегда</span>' : '<span class="badge sub">Подписка</span>'}</td>
       <td class="num money pos">${int(c.paid_rub)}</td>
-      <td class="num">${int(c.api_calls)}</td>
-      <td class="num">${usd(c.api_cost_usd)}${costRub == null ? '' : ` <span class="rub-eq">${rubEq(c.api_cost_usd)}</span>`}</td>
-      <td class="num money${bad ? '' : ' pos'}">${margin == null ? '—' : (bad ? '−' : '') + int(Math.abs(margin))}</td>
+      <td class="num">${observed ? int(c.api_calls) : unknown}</td>
+      <td class="num">${observed
+        ? `${usd(c.api_cost_usd)}${costRub == null ? '' : ` <span class="rub-eq">${rubEq(c.api_cost_usd)}</span>`}`
+        : unknown}</td>
+      <td class="num money${bad ? '' : ' pos'}">${margin == null ? unknown : (bad ? '−' : '') + int(Math.abs(margin))}</td>
     </tr>`;
   }).join('');
 }
@@ -956,6 +1027,196 @@ async function openUser(deviceId) {
 const EV_LABEL = { solve: 'Решение', test_solve: 'Тест', test_requestion: 'Перерешать', gdz_pull: 'ГДЗ', heartbeat: 'Активность', install: 'Установка', update: 'Обновление', error: 'Ошибка', ai_call: 'API-вызов (сервер)' };
 function closeDrawer() { $('#drawer').classList.remove('open'); $('#drawerScrim').classList.remove('open'); $('#drawer').setAttribute('aria-hidden', 'true'); }
 
+/* ---------- live AI routing ---------- */
+const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
+
+function parseModelChain(value, label) {
+  const models = [...new Set(String(value || '').split(',').map((x) => x.trim()).filter(Boolean))];
+  if (!models.length || models.length > 8 || models.some((model) => !MODEL_ID_RE.test(model))) {
+    throw new Error(`${label}: от 1 до 8 model id через запятую, без пробелов внутри id.`);
+  }
+  return models;
+}
+
+function setModelConnection(online, text) {
+  const el = $('#modelLiveStatus');
+  el.classList.toggle('online', online);
+  el.classList.toggle('offline', !online);
+  el.innerHTML = `<i></i>${esc(text)}`;
+  $('#modelDisconnect').hidden = !online;
+}
+
+function readModelForm() {
+  const current = state.models.current;
+  if (!current) throw new Error('Сначала подключите управление.');
+  let rates;
+  try { rates = JSON.parse($('#modelRates').value || '{}'); }
+  catch { throw new Error('Цены: JSON не читается. Проверьте запятые и кавычки.'); }
+  if (!rates || typeof rates !== 'object' || Array.isArray(rates)) {
+    throw new Error('Цены должны быть JSON-объектом.');
+  }
+  return {
+    limits: {
+      frontier_per_license: Number($('#frontierLimit').value),
+      standard_per_license: Number($('#standardLimit').value),
+      global_daily: Number($('#globalLimit').value),
+      force_standard: $('#forceStandard').checked
+    },
+    routes: {
+      qwen: {
+        label: current.config.routes.qwen.label,
+        text: parseModelChain($('#qwenText').value, 'Think · текст'),
+        vision: parseModelChain($('#qwenVision').value, 'Think · изображения'),
+        reasoning_effort: $('#qwenReasoning').checked
+      },
+      deepseek: {
+        label: current.config.routes.deepseek.label,
+        text: parseModelChain($('#deepseekText').value, 'Auto · текст'),
+        vision: parseModelChain($('#deepseekVision').value, 'Auto · изображения'),
+        reasoning_effort: $('#deepseekReasoning').checked
+      },
+      standard: {
+        label: current.config.routes.standard.label,
+        text: parseModelChain($('#standardText').value, 'Дешёвая цепочка · текст'),
+        vision: parseModelChain($('#standardVision').value, 'Дешёвая цепочка · изображения'),
+        reasoning_effort: $('#standardReasoning').checked
+      },
+      pdf: {
+        label: current.config.routes.pdf.label,
+        models: parseModelChain($('#pdfModels').value, 'PDF')
+      }
+    },
+    rates
+  };
+}
+
+function updateModelDraftState() {
+  const el = $('#modelDraftState');
+  if (!state.models.current) return;
+  try {
+    const dirty = JSON.stringify(readModelForm()) !== JSON.stringify(state.models.current.config);
+    el.className = `draft-state ${dirty ? 'dirty' : 'clean'}`;
+    el.textContent = dirty ? 'есть несохранённый черновик' : 'нет черновика';
+    $('#modelSaveError').textContent = '';
+  } catch (error) {
+    el.className = 'draft-state invalid';
+    el.textContent = 'черновик с ошибкой';
+    $('#modelSaveError').textContent = error.message;
+  }
+}
+
+function renderModelHistory(history) {
+  const el = $('#modelHistory');
+  if (!history.length) {
+    el.innerHTML = '<div class="empty-state compact">История появится после первого сохранения.</div>';
+    return;
+  }
+  el.innerHTML = history.map((entry) => `<div class="history-row">
+    <div><strong>Ревизия ${int(entry.revision)}</strong><span>${entry.updated_at ? fmtDateTime(Date.parse(entry.updated_at)) : 'стартовые настройки'} · ${esc(entry.reason || 'без причины')}</span></div>
+    <button class="btn sm ghost" type="button" data-rollback="${entry.revision}">Вернуть эту версию</button>
+  </div>`).join('');
+}
+
+function renderModelState(data) {
+  state.models.current = data;
+  $('#modelAuthPanel').hidden = true;
+  $('#modelConfigForm').hidden = false;
+  setModelConnection(true, data.config.limits.force_standard ? 'дешёвый режим включён' : 'VPS подключён');
+  $('#modelRevision').textContent = `ревизия ${data.revision}`;
+  $('#modelUpdated').textContent = data.updated_at ? fmtDateTime(Date.parse(data.updated_at)) : 'ещё не сохранялось';
+  $('#modelSource').textContent = data.source === 'saved' ? 'файл на VPS' : 'env + безопасные defaults';
+  const warning = $('#modelHealthWarning');
+  warning.hidden = data.healthy !== false;
+  warning.innerHTML = data.healthy === false
+    ? '<div class="banner-title">VPS заблокировал новые AI-запросы</div>Файл конфигурации повреждён или не записывается. Исправьте поля и сохраните: успешная атомарная запись снова откроет маршрутизацию.'
+    : '';
+
+  const { limits, routes, rates } = data.config;
+  $('#frontierLimit').value = limits.frontier_per_license;
+  $('#standardLimit').value = limits.standard_per_license;
+  $('#globalLimit').value = limits.global_daily;
+  $('#forceStandard').checked = limits.force_standard;
+  $('#deepseekText').value = routes.deepseek.text.join(', ');
+  $('#deepseekVision').value = routes.deepseek.vision.join(', ');
+  $('#deepseekReasoning').checked = routes.deepseek.reasoning_effort;
+  $('#qwenText').value = routes.qwen.text.join(', ');
+  $('#qwenVision').value = routes.qwen.vision.join(', ');
+  $('#qwenReasoning').checked = routes.qwen.reasoning_effort;
+  $('#standardText').value = routes.standard.text.join(', ');
+  $('#standardVision').value = routes.standard.vision.join(', ');
+  $('#standardReasoning').checked = routes.standard.reasoning_effort;
+  $('#pdfModels').value = routes.pdf.models.join(', ');
+  $('#modelRates').value = JSON.stringify(rates, null, 2);
+  $('#modelChangeReason').value = '';
+  renderModelHistory(data.history || []);
+  updateModelDraftState();
+}
+
+function showModelDisconnected(message = '') {
+  state.models.current = null;
+  $('#modelAuthPanel').hidden = false;
+  $('#modelConfigForm').hidden = true;
+  setModelConnection(false, 'не подключено');
+  $('#modelKeyError').textContent = message;
+}
+
+async function loadModels() {
+  if (!modelToken) { showModelDisconnected(); return; }
+  setModelConnection(false, 'подключение…');
+  try {
+    renderModelState(await modelApi('GET'));
+  } catch (error) {
+    if (error.code === 'unauthorized') clearModelToken();
+    showModelDisconnected(error.message);
+  }
+}
+
+async function saveModels(event) {
+  event.preventDefault();
+  if (state.models.busy || !state.models.current) return;
+  const errorEl = $('#modelSaveError');
+  errorEl.textContent = '';
+  let config;
+  try { config = readModelForm(); }
+  catch (error) { errorEl.textContent = error.message; updateModelDraftState(); return; }
+  if (!window.confirm('Применить этот черновик? Все новые запросы после сохранения сразу возьмут новые модели и лимиты.')) return;
+  state.models.busy = true;
+  $('#modelSave').disabled = true;
+  try {
+    const data = await modelApi('PUT', {
+      expected_revision: state.models.current.revision,
+      reason: $('#modelChangeReason').value.trim(),
+      config
+    });
+    renderModelState(data);
+    toast(`Модели применены · ревизия ${data.revision}`);
+  } catch (error) {
+    errorEl.textContent = error.message;
+    if (error.code === 'stale') await loadModels();
+  } finally {
+    state.models.busy = false;
+    $('#modelSave').disabled = false;
+  }
+}
+
+async function rollbackModels(revision) {
+  if (state.models.busy || !state.models.current) return;
+  if (!window.confirm(`Вернуть настройки ревизии ${revision}? Откат сохранится как новая ревизия и сразу пойдёт в работу.`)) return;
+  state.models.busy = true;
+  try {
+    const data = await modelApi('PUT', {
+      expected_revision: state.models.current.revision,
+      rollback_revision: revision,
+      reason: `откат к ревизии ${revision}`
+    });
+    renderModelState(data);
+    toast(`Возвращена ревизия ${revision}`);
+  } catch (error) {
+    $('#modelSaveError').textContent = error.message;
+    if (error.code === 'stale') await loadModels();
+  } finally { state.models.busy = false; }
+}
+
 /* ---------- helpers ---------- */
 function skeletonKpis(n) { return Array.from({ length: n }, () => `<div class="kpi"><div class="kpi-label skeleton">загрузка</div><div class="kpi-value skeleton">000</div></div>`).join(''); }
 function errBox(e) { return `<div class="empty-state">Не удалось загрузить: ${esc(e.message)}</div>`; }
@@ -963,7 +1224,7 @@ function iconMoney() { return `<svg viewBox="0 0 24 24" fill="none" stroke="curr
 function iconChip() { return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>`; }
 function iconUsers() { return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>`; }
 
-const LOADERS = { overview: loadOverview, users: loadUsers, money: loadMoney, subjects: loadSubjects, retention: loadRetention, feedback: loadFeedback, errors: loadErrors };
+const LOADERS = { overview: loadOverview, users: loadUsers, money: loadMoney, subjects: loadSubjects, retention: loadRetention, feedback: loadFeedback, errors: loadErrors, models: loadModels };
 function showView(view, force) {
   state.view = view;
   $$('.nav-btn').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
@@ -1006,6 +1267,46 @@ function bindChrome() {
   $('#usersPrev').addEventListener('click', () => { state.users.offset = Math.max(0, state.users.offset - state.users.limit); reload('users'); });
   $('#usersNext').addEventListener('click', () => { state.users.offset += state.users.limit; reload('users'); });
   $('#usersBody').addEventListener('click', (e) => { const tr = e.target.closest('tr[data-device]'); if (tr) openUser(tr.dataset.device); });
+  // live model routing
+  $('#modelKeyForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const value = $('#modelKeyInput').value.trim();
+    if (!value) { $('#modelKeyError').textContent = 'Введите MODEL_ADMIN_KEY.'; return; }
+    $('#modelKeyError').textContent = '';
+    saveModelToken(value);
+    try {
+      renderModelState(await modelApi('GET'));
+      $('#modelKeyInput').value = '';
+    } catch (error) {
+      clearModelToken();
+      showModelDisconnected(error.message);
+    }
+  });
+  $('#modelDisconnect').addEventListener('click', () => {
+    clearModelToken();
+    $('#modelKeyInput').value = '';
+    showModelDisconnected();
+  });
+  $('#modelConfigForm').addEventListener('submit', saveModels);
+  $('#modelConfigForm').addEventListener('input', updateModelDraftState);
+  $('#modelConfigForm').addEventListener('change', updateModelDraftState);
+  $('#modelReload').addEventListener('click', () => {
+    if (state.models.current) renderModelState(state.models.current);
+  });
+  $('#glmPreset').addEventListener('click', () => {
+    $('#standardText').value = 'glm-5.3-flash';
+    $('#standardVision').value = 'glm-4.6v-flash';
+    let rates = {};
+    try { rates = JSON.parse($('#modelRates').value || '{}'); } catch { /* replace malformed draft */ }
+    rates['glm-5.3-flash'] = { input_usd_per_m: 0.075, output_usd_per_m: 0.25 };
+    rates['glm-4.6v-flash'] = { input_usd_per_m: 0, output_usd_per_m: 0 };
+    $('#modelRates').value = JSON.stringify(rates, null, 2);
+    updateModelDraftState();
+  });
+  $('#modelHistory').addEventListener('click', (e) => {
+    const button = e.target.closest('[data-rollback]');
+    if (button) rollbackModels(Number(button.dataset.rollback));
+  });
   // drawer
   $('#drawerClose').addEventListener('click', closeDrawer);
   $('#drawerScrim').addEventListener('click', closeDrawer);
@@ -1027,7 +1328,14 @@ async function enterApp() {
   loadWorklists();
   showView('overview', true);
 }
-function logout() { clearToken(); $('#shell').hidden = true; $('#gate').style.display = 'grid'; $('#tokenInput').value = ''; }
+function logout() {
+  clearToken();
+  clearModelToken();
+  $('#shell').hidden = true;
+  $('#gate').style.display = 'grid';
+  $('#tokenInput').value = '';
+  showModelDisconnected();
+}
 
 async function tryToken(t, remember) {
   let probe;

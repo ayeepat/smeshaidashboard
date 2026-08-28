@@ -6,12 +6,13 @@
   <title>СМЭШ AI — панель</title>
   <meta name="description" content="Внутренняя панель аналитики СМЭШ AI: выручка, расход на ИИ, удержание и пользователи." />
   <meta name="robots" content="noindex, nofollow" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src https://smeshapi.site https://ai.smeshapi.site; img-src 'self'; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'" />
   <link rel="icon" type="image/png" href="assets/favicon-32.png" />
   <!-- GitHub Pages serves these with cache-control: max-age=600, so a browser
        that has been here before keeps running the previous build for up to ten
        minutes after a push — a deploy then looks like it changed nothing. Bump
        ?v= in BOTH refs whenever app.js or styles.css changes. -->
-  <link rel="stylesheet" href="styles.css?v=3" />
+  <link rel="stylesheet" href="styles.css?v=5" />
 </head>
 <body>
   <!-- ============ Login gate ============ -->
@@ -71,6 +72,10 @@
         <button class="nav-btn" data-view="errors" role="tab" type="button">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
           <span>Ошибки</span>
+        </button>
+        <button class="nav-btn" data-view="models" role="tab" type="button">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+          <span>Модели ИИ</span>
         </button>
       </nav>
 
@@ -258,7 +263,7 @@
               <tbody id="marginBody"></tbody>
             </table>
           </div>
-          <p class="muted" style="font-size:11.5px;margin:14px 0 0">Считается по серверным вызовам ИИ (не по opt-in телеметрии), от даты покупки. Ключи показаны последними 4 символами — панель не должна раздавать рабочие ключи. Отрицательная маржа = этот пользователь дороже своей подписки.</p>
+          <p class="muted" style="font-size:11.5px;margin:14px 0 0">Считается по вызовам ИИ, о которых отчитался прокси, от даты покупки. <b>Прокси отчитывается только по тем, кто сам включил телеметрию в настройках расширения, а она выключена по умолчанию.</b> У остальных расход не нулевой, а неизвестный: такие строки показаны как «—» и не считаются прибыльными. Ключи показаны последними 4 символами — панель не должна раздавать рабочие ключи. Отрицательная маржа = этот пользователь дороже своей подписки.</p>
         </section>
 
         <div class="two-col">
@@ -414,6 +419,125 @@
           </div>
         </section>
       </section>
+
+      <!-- ---------- Live AI routing ---------- -->
+      <section class="panelview" data-view="models">
+        <div class="page-head">
+          <div>
+            <p class="eyebrow">302.AI · применяется сразу</p>
+            <h2>Маршрутизация ИИ</h2>
+            <p class="sub">Следующий новый запрос возьмёт сохранённые модели и лимиты. Обновлять расширение в Chrome Web Store не нужно.</p>
+          </div>
+          <div class="model-head-actions">
+            <span class="live-pill offline" id="modelLiveStatus"><i></i>не подключено</span>
+            <button class="btn sm ghost" id="modelDisconnect" type="button" hidden>Отключить ключ</button>
+          </div>
+        </div>
+
+        <section class="panel model-auth" id="modelAuthPanel">
+          <div>
+            <h3>Ключ управления моделями</h3>
+            <p>Нужен отдельный <code>MODEL_ADMIN_KEY</code> с VPS. Ключ живёт только в этой вкладке и исчезнет после её закрытия.</p>
+          </div>
+          <form id="modelKeyForm" class="model-key-form" autocomplete="off">
+            <label for="modelKeyInput">MODEL_ADMIN_KEY</label>
+            <div class="inline-field">
+              <input id="modelKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="вставьте ключ с VPS" />
+              <button class="btn primary" type="submit">Подключить управление</button>
+            </div>
+            <p class="form-error" id="modelKeyError"></p>
+          </form>
+        </section>
+
+        <form id="modelConfigForm" class="model-config" hidden>
+          <div class="model-statebar">
+            <div><span>Сохранено</span><strong id="modelRevision">ревизия —</strong></div>
+            <div><span>Изменено</span><strong id="modelUpdated">—</strong></div>
+            <div><span>Источник</span><strong id="modelSource">—</strong></div>
+            <div class="draft-state clean" id="modelDraftState">нет черновика</div>
+          </div>
+
+          <div class="banner model-warning" id="modelHealthWarning" hidden></div>
+
+          <section class="panel emergency-panel">
+            <div>
+              <h3>Аварийный дешёвый режим</h3>
+              <p>Все новые текстовые и графические запросы идут через стандартную цепочку. PDF остаются на отдельной PDF-цепочке.</p>
+            </div>
+            <label class="switch-line" for="forceStandard">
+              <input id="forceStandard" type="checkbox" />
+              <span>Отправлять всех на дешёвую модель</span>
+            </label>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head-row"><h3>Дневные лимиты</h3><span class="muted">на лицензию · московское время</span></div>
+            <div class="model-grid three">
+              <div class="field"><label for="frontierLimit">Frontier-запросов</label><input id="frontierLimit" type="number" min="0" max="5000" step="1" /><small>Общий лимит Auto + Think. После него включается дешёвая цепочка.</small></div>
+              <div class="field"><label for="standardLimit">Дешёвых запросов</label><input id="standardLimit" type="number" min="1" max="10000" step="1" /><small>Защита от бесконечного использования после frontier-лимита.</small></div>
+              <div class="field"><label for="globalLimit">Глобально в день</label><input id="globalLimit" type="number" min="1" max="100000" step="1" /><small>Последний предохранитель для всех лицензий вместе.</small></div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head-row"><h3>Frontier-цепочки</h3><span class="muted">модели через запятую · первая основная, остальные fallback</span></div>
+            <div class="route-stack">
+              <fieldset class="route-row">
+                <legend>Auto <span>клиентский route: deepseek</span></legend>
+                <div class="model-grid two">
+                  <div class="field"><label for="deepseekText">Текст</label><input id="deepseekText" type="text" spellcheck="false" /></div>
+                  <div class="field"><label for="deepseekVision">Изображения</label><input id="deepseekVision" type="text" spellcheck="false" /></div>
+                </div>
+                <label class="check-line"><input id="deepseekReasoning" type="checkbox" /> Передавать <code>reasoning_effort</code></label>
+              </fieldset>
+              <fieldset class="route-row">
+                <legend>Think <span>клиентский route: qwen</span></legend>
+                <div class="model-grid two">
+                  <div class="field"><label for="qwenText">Текст</label><input id="qwenText" type="text" spellcheck="false" /></div>
+                  <div class="field"><label for="qwenVision">Изображения</label><input id="qwenVision" type="text" spellcheck="false" /></div>
+                </div>
+                <label class="check-line"><input id="qwenReasoning" type="checkbox" /> Передавать <code>reasoning_effort</code></label>
+              </fieldset>
+            </div>
+          </section>
+
+          <section class="panel standard-panel">
+            <div class="panel-head-row">
+              <div><h3>Дешёвая цепочка</h3><p class="panel-sub">Используется после frontier-лимита и при аварийном режиме.</p></div>
+              <button class="btn sm" id="glmPreset" type="button">Поставить GLM-5.3-Flash</button>
+            </div>
+            <div class="model-grid two">
+              <div class="field"><label for="standardText">Текст</label><input id="standardText" type="text" spellcheck="false" /></div>
+              <div class="field"><label for="standardVision">Изображения</label><input id="standardVision" type="text" spellcheck="false" /></div>
+            </div>
+            <label class="check-line"><input id="standardReasoning" type="checkbox" /> Передавать <code>reasoning_effort</code></label>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head-row"><h3>PDF и учёт стоимости</h3><span class="muted">PDF не смешиваются с обычными моделями</span></div>
+            <div class="field"><label for="pdfModels">PDF-цепочка</label><input id="pdfModels" type="text" spellcheck="false" /></div>
+            <div class="field rates-field">
+              <label for="modelRates">Цены 302.AI, USD за 1M токенов</label>
+              <textarea id="modelRates" rows="8" spellcheck="false"></textarea>
+              <small>JSON: <code>{"model-id":{"input_usd_per_m":0.075,"output_usd_per_m":0.25}}</code>. Нужен для честного расхода в аналитике; маршрутизацию не ограничивает.</small>
+            </div>
+          </section>
+
+          <section class="panel save-panel">
+            <div class="field grow"><label for="modelChangeReason">Причина изменения</label><input id="modelChangeReason" type="text" maxlength="200" placeholder="например: 302.AI поднял цену GLM" /></div>
+            <div class="save-actions">
+              <button class="btn ghost" id="modelReload" type="button">Отменить черновик</button>
+              <button class="btn primary" id="modelSave" type="submit">Применить ко всем новым запросам</button>
+            </div>
+            <p class="form-error" id="modelSaveError"></p>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head-row"><h3>Откат</h3><span class="muted">последние 10 сохранений</span></div>
+            <div id="modelHistory" class="history-list"></div>
+          </section>
+        </form>
+      </section>
     </main>
   </div>
 
@@ -429,6 +553,6 @@
 
   <div class="toast" id="toast"></div>
 
-  <script src="app.js?v=3"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>
