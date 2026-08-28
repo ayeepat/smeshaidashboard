@@ -343,6 +343,20 @@ td .rub-eq { display: block; font-size: 11px; margin-top: 1px; }
 .banner .banner-line b { color: var(--text); }
 .banner .banner-real { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--separator); color: var(--green); font-size: 12px; }
 
+/* Operational queues. Red, not yellow: the honesty banner explains what a
+   number means, this one says a paying customer is currently waiting. It sits
+   above every view and is hidden entirely when the queues are clean. */
+.ops-strip { margin-bottom: 18px; }
+.ops-strip.alert {
+  background: rgba(200, 42, 42, 0.07);
+  border-color: rgba(200, 42, 42, 0.30);
+  border-left-color: var(--danger);
+}
+.ops-strip.alert .banner-title { color: var(--danger); }
+/* A paying customer who costs more than they pay. */
+tr.row-alert td { background: rgba(200, 42, 42, 0.06); }
+tr.row-alert td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
+
 /* horizontal proportion bar for subjects */
 .hbar-row { display: grid; grid-template-columns: 150px 1fr 62px; align-items: center; gap: 12px; padding: 7px 0; }
 .hbar-row .lbl { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

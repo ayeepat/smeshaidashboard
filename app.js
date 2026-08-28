@@ -477,6 +477,45 @@ async function loadUsers() {
   $('#usersNext').disabled = to >= data.total;
 }
 
+/* ---------- Ops worklist strip ---------- */
+// Every one of these is a promise to a paying customer that is currently
+// unkept. The strip is only drawn when something is actually stuck (or when
+// the check itself failed) so it never becomes background noise you stop
+// seeing — which is exactly what would make it useless the day it matters.
+const WORKLIST_LABEL = {
+  delivery_exhausted: 'Оплатили, но ключ не доставлен',
+  payment_review_open: 'Платежи на ручной проверке',
+  payment_reconciliation_errors: 'Ошибки сверки с Robokassa',
+  refund_submission_unknown: 'Возврат начат, но не отправлен',
+  refund_poll_stalled: 'Возврат завис у провайдера',
+  referral_unsettled: 'Реферальные награды не начислены',
+  referral_legacy_unjournaled: 'Старые реф. начисления без журнала',
+  support_forward_exhausted: 'Обращения не дошли до меня',
+  subscription_notify_exhausted: 'Напоминания не отправились'
+};
+
+async function loadWorklists() {
+  const el = $('#opsStrip');
+  if (!el) return;
+  let data;
+  try { data = await api('/admin/stats/worklists'); }
+  catch { el.style.display = 'none'; return; }
+
+  if (data.worklists === null) {
+    el.style.display = '';
+    el.className = 'banner ops-strip';
+    el.innerHTML = `<div class="banner-title">Очереди не проверены</div>
+      <div class="banner-line">Не удалось прочитать рабочие очереди. Это <b>не</b> значит, что всё чисто — значит, что проверить не вышло.</div>`;
+    return;
+  }
+  const stuck = Object.entries(data.worklists).filter(([, n]) => n > 0);
+  if (!stuck.length) { el.style.display = 'none'; return; }
+  el.style.display = '';
+  el.className = 'banner ops-strip alert';
+  el.innerHTML = `<div class="banner-title">Нужно вмешаться — ${int(data.total)}</div>` +
+    stuck.map(([k, n]) => `<div class="banner-line"><b>${int(n)}</b> · ${esc(WORKLIST_LABEL[k] || k)}</div>`).join('');
+}
+
 /* ---------- Money ---------- */
 // Refunds are counted on the day the money went back, so a refund of an older
 // purchase lands in this window while its sale does not — the same convention
@@ -491,10 +530,23 @@ function refundFoot(s) {
 
 async function loadMoney() {
   const days = state.range.money;
-  $('#moneyKpis').innerHTML = skeletonKpis(4);
+  $('#moneyKpis').innerHTML = skeletonKpis(5);
   let data, refs;
-  try { [data, refs] = await Promise.all([api(`/admin/stats/purchases?days=${days}`), api('/admin/stats/referrals')]); }
-  catch (e) { $('#moneyKpis').innerHTML = errBox(e); return; }
+  try {
+    [data, refs] = await Promise.all([
+      api(`/admin/stats/purchases?days=${days}`),
+      api('/admin/stats/referrals')
+    ]);
+  } catch (e) { $('#moneyKpis').innerHTML = errBox(e); return; }
+
+  // The newer panels are loaded independently and each survives its own
+  // failure. Their routes ship with the worker, so between a dashboard push
+  // and a `wrangler deploy` they return 404 — and one undeployed endpoint must
+  // not blank out the revenue view that was working fine before.
+  // Subscription state takes no period: "how many subscriptions do I have" is
+  // not a question about a window.
+  loadPanel('#subsKpis', '/admin/stats/subscriptions', renderSubscriptions);
+  loadPanel('#funnelBox', `/admin/stats/funnel?days=${days}`, renderFunnel);
   const s = data.summary;
   // Gross is what was charged; net subtracts refunds that actually settled in
   // the same period. A revoked key is NOT a refund — it can be revoked for
@@ -524,6 +576,8 @@ async function loadMoney() {
     </tr>`;
   }).join('') : `<tr class="loading-row"><td colspan="6">Пока нет покупок за этот период.</td></tr>`;
 
+  renderMargin(days);
+
   $('#gatewaysBox').innerHTML = data.gateways.length
     ? propBars(data.gateways.map((g) => ({ label: g.gateway, value: g.revenue_rub || g.n, display: g.revenue_rub ? rub(g.revenue_rub) : int(g.n) + ' шт' })))
     : emptyChart();
@@ -540,6 +594,110 @@ async function loadMoney() {
         <div class="val">${int(r.purchases)} пок.</div>
         <div class="val" style="color:var(--accent)">+${int(r.days_earned)} дн</div>
       </div>`).join('') : ''}`;
+}
+
+// Fetch one panel's data and render it, containing any failure to that panel.
+// A 404 here means "the worker predates this endpoint", which is a deploy
+// state worth naming rather than a generic red box.
+async function loadPanel(selector, path, render) {
+  const el = $(selector);
+  if (!el) return;
+  try {
+    render(await api(path));
+  } catch (e) {
+    const stale = /http_404|not_found/.test(e.message);
+    el.innerHTML = `<div class="empty-state">${stale
+      ? 'Этот блок появится после деплоя воркера (npx wrangler deploy).'
+      : 'Не удалось загрузить: ' + esc(e.message)}</div>`;
+  }
+}
+
+/* ---------- Subscription state (snapshot, not a window) ---------- */
+function renderSubscriptions(s) {
+  renderKpis($('#subsKpis'), [
+    { label: 'MRR', value: rub(s.mrr_rub), accent: s.mrr_rub > 0, icon: iconMoney(),
+      // Each plan is normalised to 30 days from its own term, so a 90-day
+      // purchase contributes a third of its price per month instead of
+      // looking like a spike in the month it was bought.
+      foot: `${int(s.active)} активных подписок · нормализовано на 30 дней` },
+    { label: 'Средний чек в месяц', value: s.arpu_rub == null ? '—' : rub(s.arpu_rub),
+      foot: s.arpu_rub == null ? 'нет активных подписок' : 'MRR ÷ активные подписки' },
+    { label: 'Истекает за 7 дней', value: int(s.expiring_7d),
+      foot: `${int(s.expiring_30d)} за 30 дней · бот напомнит сам`,
+      accent: false },
+    { label: 'Не продлили за 30 дней', value: int(s.lapsed_30d),
+      foot: 'истекли и не купили заново' },
+    { label: 'Ключи навсегда', value: int(s.lifetimes), foot: 'не входят в MRR' }
+  ]);
+}
+
+/* ---------- Checkout funnel ---------- */
+function renderFunnel(f) {
+  const box = $('#funnelBox');
+  if (!f.created) {
+    box.innerHTML = `<div class="empty-state">За период не создано ни одного заказа.</div>`;
+    return;
+  }
+  const rows = [
+    { label: 'Создали заказ', value: f.created, color: 'var(--tertiary)' },
+    { label: 'Оплатили', value: f.paid, color: 'var(--green)' },
+    { label: 'Получили ключ', value: f.fulfilled, color: 'var(--accent)' }
+  ];
+  const conv = f.conversion_rate == null ? '—' : pct(f.conversion_rate);
+  box.innerHTML =
+    `<div class="mini-kpis" style="grid-template-columns:repeat(3,1fr);margin-bottom:14px">
+      <div class="mini-kpi"><div class="l">Конверсия в оплату</div><div class="v">${conv}</div></div>
+      <div class="mini-kpi"><div class="l">Бросили корзину</div><div class="v">${int(f.abandoned)}</div></div>
+      <div class="mini-kpi"><div class="l">Недополучено</div><div class="v">${rub(f.lost_rub)}</div></div>
+    </div>` +
+    propBars(rows, { total: f.created }) +
+    `<p class="muted" style="font-size:11.5px;margin:14px 0 0">
+      ${int(f.in_flight)} заказов ещё в процессе (срок не истёк) — они не считаются потерянными.
+      «Недополучено» — сумма брошенных корзин по прайсу, а не долг.
+      ${f.review ? `<b>${int(f.review)}</b> на ручной проверке. ` : ''}Только продакшен-заказы.
+    </p>`;
+}
+
+/* ---------- Cost to serve each paying customer ---------- */
+async function renderMargin(days) {
+  const body = $('#marginBody');
+  body.innerHTML = `<tr class="loading-row"><td colspan="6">Загрузка…</td></tr>`;
+  let m;
+  try { m = await api(`/admin/stats/margin?days=${days}&limit=100`); }
+  catch (e) {
+    const stale = /http_404|not_found/.test(e.message);
+    body.innerHTML = `<tr class="loading-row"><td colspan="6">${stale
+      ? 'Появится после деплоя воркера (npx wrangler deploy).'
+      : 'Ошибка: ' + esc(e.message)}</td></tr>`;
+    return;
+  }
+
+  if (!m.customers.length) {
+    body.innerHTML = `<tr class="loading-row"><td colspan="6">Нет платных ключей за период.</td></tr>`;
+    $('#marginNote').textContent = '';
+    return;
+  }
+  const rate = fxRate();
+  const totalCostRub = usd2rub(m.api_cost_usd);
+  $('#marginNote').innerHTML = totalCostRub == null
+    ? `${int(m.counted)} ключей · ${usd(m.api_cost_usd)} расхода`
+    : `${int(m.counted)} ключей · заплатили ${rub(m.paid_rub)} · стоили ${usdDual(m.api_cost_usd)}`;
+
+  body.innerHTML = m.customers.map((c) => {
+    const costRub = usd2rub(c.api_cost_usd);
+    // Margin is only meaningful once the $→₽ rate is known; without it the
+    // row shows the two figures and refuses to invent a comparison.
+    const margin = costRub == null ? null : c.paid_rub - costRub;
+    const bad = margin != null && margin < 0;
+    return `<tr${bad ? ' class="row-alert"' : ''}>
+      <td class="mono">${esc(c.key_hint)}</td>
+      <td>${c.type === 'lifetime' ? '<span class="badge lifetime">Навсегда</span>' : '<span class="badge sub">Подписка</span>'}</td>
+      <td class="num money pos">${int(c.paid_rub)}</td>
+      <td class="num">${int(c.api_calls)}</td>
+      <td class="num">${usd(c.api_cost_usd)}${costRub == null ? '' : ` <span class="rub-eq">${rubEq(c.api_cost_usd)}</span>`}</td>
+      <td class="num money${bad ? '' : ' pos'}">${margin == null ? '—' : (bad ? '−' : '') + int(Math.abs(margin))}</td>
+    </tr>`;
+  }).join('');
 }
 
 /* ---------- Subjects ---------- */
@@ -864,6 +1022,9 @@ async function enterApp() {
   $('#shell').hidden = false;
   // Live rate + capture-status first so the very first render is honest.
   await Promise.all([loadRate(), loadCaptured()]);
+  // Stuck queues are shown on every view, not buried in one tab: "money taken,
+  // key never delivered" should not wait to be looked for.
+  loadWorklists();
   showView('overview', true);
 }
 function logout() { clearToken(); $('#shell').hidden = true; $('#gate').style.display = 'grid'; $('#tokenInput').value = ''; }
