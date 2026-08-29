@@ -1304,6 +1304,20 @@ function bindChrome() {
   $('#modelReload').addEventListener('click', () => {
     if (state.models.current) renderModelState(state.models.current);
   });
+  // Auto is the route that solves homework AND tests, so its preset is the
+  // one-click switch between live models. qwen3.7-plus is multimodal, which is
+  // why the same id goes into both the text and the image chain; qwen-vl-plus
+  // trails it as a vision-capable fallback. The VPS sends Qwen no
+  // reasoning_effort at all, but the checkbox stays on so flipping back to
+  // GLM or DeepSeek does not silently lose the passthrough.
+  $('#autoQwenPreset').addEventListener('click', () => {
+    $('#deepseekText').value = 'qwen3.7-plus';
+    $('#deepseekVision').value = 'qwen3.7-plus, qwen-vl-plus';
+    $('#deepseekReasoning').checked = true;
+    rememberModelRate('qwen3.7-plus', 0.32, 1.28);
+    rememberModelRate('qwen-vl-plus', 0.32, 1.28);
+    updateModelDraftState();
+  });
   $('#autoGlmPreset').addEventListener('click', () => {
     $('#deepseekText').value = 'glm-5.3-flash';
     $('#deepseekVision').value = 'glm-5.3-flash';
@@ -1313,10 +1327,21 @@ function bindChrome() {
   });
   $('#autoDeepseekPreset').addEventListener('click', () => {
     $('#deepseekText').value = 'deepseek-v4-flash';
-    $('#deepseekVision').value = 'glm-5.3-flash';
+    // DeepSeek V4 is text-only, so images need a multimodal stand-in.
+    $('#deepseekVision').value = 'qwen3.7-plus';
     $('#deepseekReasoning').checked = true;
     rememberModelRate('deepseek-v4-flash', 0.20, 0.40);
-    rememberModelRate('glm-5.3-flash', 0.075, 0.25);
+    rememberModelRate('qwen3.7-plus', 0.32, 1.28);
+    updateModelDraftState();
+  });
+  $('#thinkQwenPreset').addEventListener('click', () => {
+    $('#qwenText').value = 'qwen3.7-plus, qwen-vl-plus, qwen-plus';
+    // Vision chain excludes text-only qwen-plus on purpose: it answers an
+    // image request with HTTP 200 and a wrong guess instead of an error.
+    $('#qwenVision').value = 'qwen3.7-plus, qwen-vl-plus';
+    $('#qwenReasoning').checked = false;
+    rememberModelRate('qwen3.7-plus', 0.32, 1.28);
+    rememberModelRate('qwen-vl-plus', 0.32, 1.28);
     updateModelDraftState();
   });
   $('#glmPreset').addEventListener('click', () => {

@@ -488,7 +488,8 @@
                 <div class="route-preset-row">
                   <span>Быстрый выбор</span>
                   <div>
-                    <button class="btn sm" id="autoGlmPreset" type="button">GLM-5.3-Flash</button>
+                    <button class="btn sm" id="autoQwenPreset" type="button">Qwen 3.7 Plus</button>
+                    <button class="btn sm ghost" id="autoGlmPreset" type="button">GLM-5.3-Flash</button>
                     <button class="btn sm ghost" id="autoDeepseekPreset" type="button">DeepSeek V4 Flash · текст</button>
                   </div>
                 </div>
@@ -497,15 +498,22 @@
                   <div class="field"><label for="deepseekVision">Изображения</label><input id="deepseekVision" type="text" spellcheck="false" /></div>
                 </div>
                 <label class="check-line"><input id="deepseekReasoning" type="checkbox" /> Передавать <code>reasoning_effort</code></label>
-                <p class="route-policy">GLM-5.3-Flash всегда запускается с thinking + max на VPS. Пресет DeepSeek меняет только текст; изображения остаются на GLM, потому что DeepSeek их не читает.</p>
+                <p class="route-policy">Auto решает и домашку, и тесты. Сейчас это Qwen 3.7 Plus: он думает по умолчанию, своих уровней усилия у него нет, поэтому VPS не шлёт ему <code>reasoning_effort</code> вообще, а <code>json_object</code> снимает на запросах с картинкой. GLM-5.3-Flash вместо этого всегда получает thinking + max. Пресет DeepSeek меняет только текст; изображения остаются на мультимодальной модели, потому что DeepSeek V4 их не читает.</p>
               </fieldset>
               <fieldset class="route-row">
                 <legend>Think <span>клиентский route: qwen</span></legend>
+                <div class="route-preset-row">
+                  <span>Быстрый выбор</span>
+                  <div>
+                    <button class="btn sm" id="thinkQwenPreset" type="button">Qwen 3.7 Plus</button>
+                  </div>
+                </div>
                 <div class="model-grid two">
                   <div class="field"><label for="qwenText">Текст</label><input id="qwenText" type="text" spellcheck="false" /></div>
                   <div class="field"><label for="qwenVision">Изображения</label><input id="qwenVision" type="text" spellcheck="false" /></div>
                 </div>
                 <label class="check-line"><input id="qwenReasoning" type="checkbox" /> Передавать <code>reasoning_effort</code></label>
+                <p class="route-policy">В цепочку изображений можно ставить только модели с vision: текстовая модель отвечает на картинку не ошибкой, а уверенной выдумкой.</p>
               </fieldset>
             </div>
           </section>
