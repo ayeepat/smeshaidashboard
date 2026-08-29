@@ -1038,6 +1038,15 @@ function parseModelChain(value, label) {
   return models;
 }
 
+function rememberModelRate(model, inputUsdPerM, outputUsdPerM) {
+  let rates = {};
+  try { rates = JSON.parse($('#modelRates').value || '{}'); }
+  catch { /* replace a malformed draft with the selected preset's known rate */ }
+  if (!rates || typeof rates !== 'object' || Array.isArray(rates)) rates = {};
+  rates[model] = { input_usd_per_m: inputUsdPerM, output_usd_per_m: outputUsdPerM };
+  $('#modelRates').value = JSON.stringify(rates, null, 2);
+}
+
 function setModelConnection(online, text) {
   const el = $('#modelLiveStatus');
   el.classList.toggle('online', online);
@@ -1295,14 +1304,25 @@ function bindChrome() {
   $('#modelReload').addEventListener('click', () => {
     if (state.models.current) renderModelState(state.models.current);
   });
+  $('#autoGlmPreset').addEventListener('click', () => {
+    $('#deepseekText').value = 'glm-5.3-flash';
+    $('#deepseekVision').value = 'glm-5.3-flash';
+    $('#deepseekReasoning').checked = true;
+    rememberModelRate('glm-5.3-flash', 0.075, 0.25);
+    updateModelDraftState();
+  });
+  $('#autoDeepseekPreset').addEventListener('click', () => {
+    $('#deepseekText').value = 'deepseek-v4-flash';
+    $('#deepseekVision').value = 'glm-5.3-flash';
+    $('#deepseekReasoning').checked = true;
+    rememberModelRate('deepseek-v4-flash', 0.20, 0.40);
+    rememberModelRate('glm-5.3-flash', 0.075, 0.25);
+    updateModelDraftState();
+  });
   $('#glmPreset').addEventListener('click', () => {
     $('#standardText').value = 'glm-5.3-flash';
-    $('#standardVision').value = 'glm-4.6v-flash';
-    let rates = {};
-    try { rates = JSON.parse($('#modelRates').value || '{}'); } catch { /* replace malformed draft */ }
-    rates['glm-5.3-flash'] = { input_usd_per_m: 0.075, output_usd_per_m: 0.25 };
-    rates['glm-4.6v-flash'] = { input_usd_per_m: 0, output_usd_per_m: 0 };
-    $('#modelRates').value = JSON.stringify(rates, null, 2);
+    $('#standardVision').value = 'glm-5.3-flash';
+    rememberModelRate('glm-5.3-flash', 0.075, 0.25);
     updateModelDraftState();
   });
   $('#modelHistory').addEventListener('click', (e) => {

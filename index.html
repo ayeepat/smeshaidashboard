@@ -12,7 +12,7 @@
        that has been here before keeps running the previous build for up to ten
        minutes after a push — a deploy then looks like it changed nothing. Bump
        ?v= in BOTH refs whenever app.js or styles.css changes. -->
-  <link rel="stylesheet" href="styles.css?v=6" />
+  <link rel="stylesheet" href="styles.css?v=7" />
 </head>
 <body>
   <!-- ============ Login gate ============ -->
@@ -484,12 +484,20 @@
             <div class="panel-head-row"><h3>Frontier-цепочки</h3><span class="muted">модели через запятую · первая основная, остальные fallback</span></div>
             <div class="route-stack">
               <fieldset class="route-row">
-                <legend>Auto <span>клиентский route: deepseek</span></legend>
+                <legend>Auto <span>клиентский route: deepseek · legacy id</span></legend>
+                <div class="route-preset-row">
+                  <span>Быстрый выбор</span>
+                  <div>
+                    <button class="btn sm" id="autoGlmPreset" type="button">GLM-5.3-Flash</button>
+                    <button class="btn sm ghost" id="autoDeepseekPreset" type="button">DeepSeek V4 Flash · текст</button>
+                  </div>
+                </div>
                 <div class="model-grid two">
                   <div class="field"><label for="deepseekText">Текст</label><input id="deepseekText" type="text" spellcheck="false" /></div>
                   <div class="field"><label for="deepseekVision">Изображения</label><input id="deepseekVision" type="text" spellcheck="false" /></div>
                 </div>
                 <label class="check-line"><input id="deepseekReasoning" type="checkbox" /> Передавать <code>reasoning_effort</code></label>
+                <p class="route-policy">GLM-5.3-Flash всегда запускается с thinking + max на VPS. Пресет DeepSeek меняет только текст; изображения остаются на GLM, потому что DeepSeek их не читает.</p>
               </fieldset>
               <fieldset class="route-row">
                 <legend>Think <span>клиентский route: qwen</span></legend>
@@ -554,6 +562,6 @@
 
   <div class="toast" id="toast"></div>
 
-  <script src="app.js?v=5"></script>
+  <script src="app.js?v=6"></script>
 </body>
 </html>
