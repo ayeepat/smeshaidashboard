@@ -1,0 +1,8 @@
+{
+  "name": "smeshai-operations-dashboard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --check app.js && node tests/security-regression.mjs"
+  }
+}

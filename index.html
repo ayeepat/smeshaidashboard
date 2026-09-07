@@ -12,7 +12,7 @@
        that has been here before keeps running the previous build for up to ten
        minutes after a push — a deploy then looks like it changed nothing. Bump
        ?v= in BOTH refs whenever app.js or styles.css changes. -->
-  <link rel="stylesheet" href="styles.css?v=7" />
+  <link rel="stylesheet" href="styles.css?v=8" />
 </head>
 <body>
   <!-- ============ Login gate ============ -->
@@ -20,14 +20,11 @@
     <form class="gate-card" id="gateForm" autocomplete="off">
       <img src="assets/logo-mark.png" alt="СМЭШ AI" />
       <h1>Панель СМЭШ AI</h1>
-      <p>Внутренняя аналитика. Введите ключ статистики, чтобы продолжить.</p>
+      <p>Внутренняя аналитика. Ключ хранится только в памяти этой вкладки и исчезнет после закрытия или обновления.</p>
       <div class="field">
         <label for="tokenInput">Ключ статистики (STATS_SECRET)</label>
         <input id="tokenInput" type="password" placeholder="только чтение · не ADMIN_SECRET" autocomplete="off" spellcheck="false" />
       </div>
-      <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12.5px;color:var(--secondary);text-align:left;cursor:pointer">
-        <input type="checkbox" id="rememberToken" checked /> Запомнить на этом устройстве
-      </label>
       <button class="btn primary" type="submit" style="width:100%;margin-top:18px">Войти</button>
       <p class="gate-err" id="gateErr"></p>
     </form>
@@ -488,7 +485,8 @@
                 <div class="route-preset-row">
                   <span>Быстрый выбор</span>
                   <div>
-                    <button class="btn sm" id="autoQwenPreset" type="button">Qwen 3.7 Plus</button>
+                    <button class="btn sm" id="autoQwen38Preset" type="button">Qwen 3.8 Flash</button>
+                    <button class="btn sm ghost" id="autoQwenPreset" type="button">Qwen 3.7 Plus</button>
                     <button class="btn sm ghost" id="autoGlmPreset" type="button">GLM-5.3-Flash</button>
                     <button class="btn sm ghost" id="autoDeepseekPreset" type="button">DeepSeek V4 Flash · текст</button>
                   </div>
@@ -498,14 +496,15 @@
                   <div class="field"><label for="deepseekVision">Изображения</label><input id="deepseekVision" type="text" spellcheck="false" /></div>
                 </div>
                 <label class="check-line"><input id="deepseekReasoning" type="checkbox" /> Передавать <code>reasoning_effort</code></label>
-                <p class="route-policy">Auto решает и домашку, и тесты. Сейчас это Qwen 3.7 Plus: он думает по умолчанию, своих уровней усилия у него нет, поэтому VPS не шлёт ему <code>reasoning_effort</code> вообще, а <code>json_object</code> снимает на запросах с картинкой. GLM-5.3-Flash вместо этого всегда получает thinking + max. Пресет DeepSeek меняет только текст; изображения остаются на мультимодальной модели, потому что DeepSeek V4 их не читает.</p>
+                <p class="route-policy">Auto решает и домашку, и тесты. Сейчас это Qwen 3.8 Flash — одна мультимодальная модель на текст и картинки. У неё есть настоящие уровни усилия, но в словаре Qwen: <code>low</code> / <code>medium</code> / <code>xhigh</code>, никакого <code>high</code>. МЭШ-работа всегда идёт на <code>xhigh</code>, как бы дёшево ни просил клиент; понизить усилие может только запрос, явно пришедший с <code>tier: standard</code>. Qwen 3.7 Plus и старше думают по умолчанию и не принимают <code>reasoning_effort</code> вообще, GLM-5.3-Flash — наоборот, всегда получает thinking + max. На запросах с картинкой у любой Qwen снимается <code>json_object</code>. Пресет DeepSeek меняет только текст; изображения остаются на мультимодальной модели, потому что DeepSeek V4 их не читает.</p>
               </fieldset>
               <fieldset class="route-row">
                 <legend>Think <span>клиентский route: qwen</span></legend>
                 <div class="route-preset-row">
                   <span>Быстрый выбор</span>
                   <div>
-                    <button class="btn sm" id="thinkQwenPreset" type="button">Qwen 3.7 Plus</button>
+                    <button class="btn sm" id="thinkQwen38Preset" type="button">Qwen 3.8 Flash</button>
+                    <button class="btn sm ghost" id="thinkQwenPreset" type="button">Qwen 3.7 Plus</button>
                   </div>
                 </div>
                 <div class="model-grid two">
@@ -513,21 +512,50 @@
                   <div class="field"><label for="qwenVision">Изображения</label><input id="qwenVision" type="text" spellcheck="false" /></div>
                 </div>
                 <label class="check-line"><input id="qwenReasoning" type="checkbox" /> Передавать <code>reasoning_effort</code></label>
-                <p class="route-policy">В цепочку изображений можно ставить только модели с vision: текстовая модель отвечает на картинку не ошибкой, а уверенной выдумкой.</p>
+                <p class="route-policy">Think идёт на той же модели, что и Auto, — маршруты разные, модель одна. В цепочку изображений можно ставить только модели с vision: текстовая модель отвечает на картинку не ошибкой, а уверенной выдумкой. Галочка <code>reasoning_effort</code> влияет только на модели, о которых VPS ничего не знает: у Qwen и GLM своя политика по имени модели.</p>
               </fieldset>
             </div>
           </section>
 
           <section class="panel standard-panel">
             <div class="panel-head-row">
-              <div><h3>Дешёвая цепочка</h3><p class="panel-sub">Используется после frontier-лимита и при аварийном режиме.</p></div>
-              <button class="btn sm" id="glmPreset" type="button">Поставить GLM-5.3-Flash</button>
+              <div><h3>Дешёвая цепочка</h3><p class="panel-sub">Используется после frontier-лимита, при аварийном режиме и для решений на сторонних сайтах.</p></div>
+              <div>
+                <button class="btn sm" id="standardQwen38Preset" type="button">Qwen 3.8 Flash</button>
+                <button class="btn sm ghost" id="glmPreset" type="button">GLM-5.3-Flash</button>
+              </div>
             </div>
             <div class="model-grid two">
               <div class="field"><label for="standardText">Текст</label><input id="standardText" type="text" spellcheck="false" /></div>
               <div class="field"><label for="standardVision">Изображения</label><input id="standardVision" type="text" spellcheck="false" /></div>
             </div>
             <label class="check-line"><input id="standardReasoning" type="checkbox" /> Передавать <code>reasoning_effort</code></label>
+            <p class="route-policy">Дешевизна здесь — это пониженное усилие, а не другой вендор: та же Qwen 3.8 Flash получает <code>low</code>, когда запрос сам попросил <code>tier: standard</code> (решение на стороннем сайте), и <code>xhigh</code>, когда сюда переливается МЭШ-работа после frontier-лимита. GLM оставлен в хвосте цепочки: если Qwen ляжет целиком, дневной запас после frontier всё ещё кому-то отвечает. Галочку держите выключенной — она включает сырой passthrough клиентского хинта для незнакомых VPS моделей, а сюда попадает и домашка, которая не должна думать мельче из-за чужой подсказки «подешевле».</p>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head-row"><h3>Независимые выключатели</h3><span class="muted">вступают в силу после сохранения одной ревизии</span></div>
+            <div class="feature-switches">
+              <label class="switch-line"><input id="featureAiText" type="checkbox" /> Ответы ИИ</label>
+              <label class="switch-line"><input id="featureAiImages" type="checkbox" /> Изображения</label>
+              <label class="switch-line"><input id="featureAiDocuments" type="checkbox" /> Документы / PDF</label>
+              <label class="switch-line"><input id="featureMeshAttachments" type="checkbox" /> Вложения МЭШ</label>
+              <label class="switch-line"><input id="featureAutofill" type="checkbox" /> Автозаполнение</label>
+              <label class="switch-line"><input id="featureOtherSites" type="checkbox" /> Другие сайты</label>
+              <label class="switch-line"><input id="featureTelemetry" type="checkbox" /> Телеметрия</label>
+              <label class="switch-line"><input id="featureGdz" type="checkbox" /> ГДЗ</label>
+            </div>
+            <p class="route-policy">Ответы, изображения и документы блокируются и на VPS. Остальные функции получают подписанную конфигурацию; отдельный выключатель не меняет остальные.</p>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head-row"><h3>Реестр AI-процессоров</h3><span class="muted">модель должна быть включена здесь, прежде чем попадёт в route</span></div>
+            <div class="field rates-field">
+              <label for="modelProcessors">Публичный реестр</label>
+              <textarea id="modelProcessors" rows="12" spellcheck="false"></textarea>
+              <small>JSON по model id: название, оператор, HTTPS-ссылка на privacy и <code>enabled</code>. Публичная версия доступна на <code>/processors</code>.</small>
+              <small><strong>Gemini:</strong> для школьной аудитории держите модель и обработку документов выключенными, пока нет письменного подтверждения допустимости такой договорной цепочки.</small>
+            </div>
           </section>
 
           <section class="panel">
@@ -570,6 +598,6 @@
 
   <div class="toast" id="toast"></div>
 
-  <script src="app.js?v=6"></script>
+  <script src="app.js?v=8"></script>
 </body>
 </html>

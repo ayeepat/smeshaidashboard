@@ -28,34 +28,36 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 // preflight and the browser reported "Failed to fetch" — a blocked request,
 // never a wrong password, which is why the stored key appeared to stop working.
 const TOKEN_HEADER = 'x-stats-token';
-const TOKEN_KEY = 'smesh_stats_token';
-const MODEL_TOKEN_KEY = 'smesh_model_admin_token';
 // The pre-split key held ADMIN_SECRET. It is useless here now and is a
-// full-privilege credential sitting in browser storage, so drop it on sight.
+// full-privilege credential sitting in browser storage. Current and legacy
+// dashboard credentials are memory-only; clear persisted copies left by older
+// releases before any network request.
 const LEGACY_TOKEN_KEY = 'smesh_admin_token';
-localStorage.removeItem(LEGACY_TOKEN_KEY);
-sessionStorage.removeItem(LEGACY_TOKEN_KEY);
+const PERSISTED_SECRET_KEYS = [
+  LEGACY_TOKEN_KEY,
+  'smesh_stats_token',
+  'smesh_model_admin_token'
+];
+for (const key of PERSISTED_SECRET_KEYS) {
+  localStorage.removeItem(key);
+  sessionStorage.removeItem(key);
+}
 
-let token = localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || '';
-let modelToken = sessionStorage.getItem(MODEL_TOKEN_KEY) || '';
+let token = '';
+let modelToken = '';
 
-function saveToken(t, remember) {
+function saveToken(t) {
   token = t;
-  (remember ? localStorage : sessionStorage).setItem(TOKEN_KEY, t);
 }
 function clearToken() {
   token = '';
-  localStorage.removeItem(TOKEN_KEY);
-  sessionStorage.removeItem(TOKEN_KEY);
 }
 
 function saveModelToken(value) {
   modelToken = value;
-  sessionStorage.setItem(MODEL_TOKEN_KEY, value);
 }
 function clearModelToken() {
   modelToken = '';
-  sessionStorage.removeItem(MODEL_TOKEN_KEY);
 }
 
 // A fetch() that rejects never reached the worker: DNS, TLS, offline, or a
@@ -492,7 +494,7 @@ async function loadUsers() {
       return `<tr class="clickable" data-device="${esc(x.device_id)}">
         <td class="rank">${rank}</td>
         <td class="mono">${esc(x.device_id.slice(0, 8))}…${x.version ? ` <span class="muted">v${esc(x.version)}</span>` : ''}</td>
-        <td><span class="badge ${x.browser || 'other'}">${BROWSER_LABEL[x.browser] || 'Другой'}</span></td>
+        <td><span class="badge ${esc(x.browser || 'other')}">${BROWSER_LABEL[x.browser] || 'Другой'}</span></td>
         <td>${lic}</td>
         <td class="num">${int(x.solves)}</td>
         <td class="num">${int(x.tests)}</td>
@@ -1008,10 +1010,10 @@ async function openUser(deviceId) {
     </div>
     <dl class="kv">
       <dt>Устройство</dt><dd class="mono" style="font-size:11.5px">${esc(d.device_id)}</dd>
-      <dt>Браузер</dt><dd><span class="badge ${d.browser || 'other'}">${BROWSER_LABEL[d.browser] || 'Другой'}</span> ${d.version ? 'v' + esc(d.version) : ''}</dd>
+      <dt>Браузер</dt><dd><span class="badge ${esc(d.browser || 'other')}">${BROWSER_LABEL[d.browser] || 'Другой'}</span> ${d.version ? 'v' + esc(d.version) : ''}</dd>
       <dt>Провайдер</dt><dd>${esc(d.provider || '—')}</dd>
       <dt>Лицензия</dt><dd>${esc(licLine)}</dd>
-      <dt>Ключ</dt><dd class="mono" style="font-size:11.5px">${esc(d.license_key || '—')}</dd>
+      <dt>Ключ</dt><dd class="mono" style="font-size:11.5px">${esc(d.key_hint || '—')}</dd>
       <dt>Реф-код</dt><dd class="mono">${esc(data.referral_code || '—')}</dd>
       <dt>Первый визит</dt><dd>${fmtDate(d.first_seen)}</dd>
       <dt>Последний</dt><dd>${timeAgo(d.last_seen)}</dd>
@@ -1029,6 +1031,35 @@ function closeDrawer() { $('#drawer').classList.remove('open'); $('#drawerScrim'
 
 /* ---------- live AI routing ---------- */
 const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
+const FEATURE_CONTROLS = {
+  ai_text: 'featureAiText',
+  ai_images: 'featureAiImages',
+  ai_documents: 'featureAiDocuments',
+  mesh_attachments: 'featureMeshAttachments',
+  autofill: 'featureAutofill',
+  other_sites: 'featureOtherSites',
+  telemetry: 'featureTelemetry',
+  gdz: 'featureGdz'
+};
+
+function processorDefault(model) {
+  const lower = model.toLowerCase();
+  if (lower.startsWith('qwen')) return { display_name: 'Qwen', operator: 'Alibaba Cloud', privacy_url: 'https://www.alibabacloud.com/help/en/model-studio/privacy-notice', enabled: true };
+  // Child-facing Gemini use needs an explicit provider-contract review. New
+  // entries therefore start disabled and cannot enter a live route by accident.
+  if (lower.startsWith('gemini')) return { display_name: 'Gemini', operator: 'Google', privacy_url: 'https://ai.google.dev/gemini-api/terms', enabled: false };
+  if (lower.startsWith('glm')) return { display_name: 'GLM', operator: 'Zhipu AI via 302.AI', privacy_url: 'https://price.302.ai/en/privacy/', enabled: true };
+  if (lower.startsWith('deepseek')) return { display_name: 'DeepSeek', operator: 'DeepSeek via 302.AI', privacy_url: 'https://price.302.ai/en/privacy/', enabled: true };
+  return { display_name: model, operator: '302.AI gateway', privacy_url: 'https://price.302.ai/en/privacy/', enabled: true };
+}
+
+function rememberProcessor(model) {
+  let processors = {};
+  try { processors = JSON.parse($('#modelProcessors').value || '{}'); } catch { /* repaired below */ }
+  if (!processors || typeof processors !== 'object' || Array.isArray(processors)) processors = {};
+  if (!processors[model]) processors[model] = processorDefault(model);
+  $('#modelProcessors').value = JSON.stringify(processors, null, 2);
+}
 
 function parseModelChain(value, label) {
   const models = [...new Set(String(value || '').split(',').map((x) => x.trim()).filter(Boolean))];
@@ -1045,6 +1076,7 @@ function rememberModelRate(model, inputUsdPerM, outputUsdPerM) {
   if (!rates || typeof rates !== 'object' || Array.isArray(rates)) rates = {};
   rates[model] = { input_usd_per_m: inputUsdPerM, output_usd_per_m: outputUsdPerM };
   $('#modelRates').value = JSON.stringify(rates, null, 2);
+  rememberProcessor(model);
 }
 
 function setModelConnection(online, text) {
@@ -1064,7 +1096,13 @@ function readModelForm() {
   if (!rates || typeof rates !== 'object' || Array.isArray(rates)) {
     throw new Error('Цены должны быть JSON-объектом.');
   }
-  return {
+  let processors;
+  try { processors = JSON.parse($('#modelProcessors').value || '{}'); }
+  catch { throw new Error('Реестр процессоров: JSON не читается.'); }
+  if (!processors || typeof processors !== 'object' || Array.isArray(processors)) {
+    throw new Error('Реестр процессоров должен быть JSON-объектом.');
+  }
+  const config = {
     limits: {
       requests_per_minute: Number($('#minuteLimit').value),
       frontier_per_license: Number($('#frontierLimit').value),
@@ -1096,8 +1134,31 @@ function readModelForm() {
         models: parseModelChain($('#pdfModels').value, 'PDF')
       }
     },
-    rates
+    rates,
+    processors,
+    features: Object.fromEntries(
+      Object.entries(FEATURE_CONTROLS).map(([id, control]) => [id, $('#' + control).checked])
+    )
   };
+  if (config.features.ai_text) {
+    const activeModels = [
+      ...Object.values(config.routes)
+        .filter((route) => Array.isArray(route.text))
+        .flatMap((route) => [
+          ...route.text,
+          ...(config.features.ai_images ? route.vision : [])
+        ]),
+      ...(config.features.ai_documents ? config.routes.pdf.models : [])
+    ];
+    const restricted = activeModels.find((model) => /^gemini(?:[-._:/]|$)/i.test(model));
+    if (restricted) {
+      throw new Error(
+        `Модель ${restricted} нельзя включить для школьного продукта: ` +
+        'текущие Gemini API Terms запрещают приложения для пользователей младше 18 лет.'
+      );
+    }
+  }
+  return config;
 }
 
 function updateModelDraftState() {
@@ -1123,7 +1184,7 @@ function renderModelHistory(history) {
   }
   el.innerHTML = history.map((entry) => `<div class="history-row">
     <div><strong>Ревизия ${int(entry.revision)}</strong><span>${entry.updated_at ? fmtDateTime(Date.parse(entry.updated_at)) : 'стартовые настройки'} · ${esc(entry.reason || 'без причины')}</span></div>
-    <button class="btn sm ghost" type="button" data-rollback="${entry.revision}">Вернуть эту версию</button>
+    <button class="btn sm ghost" type="button" data-rollback="${esc(entry.revision)}">Вернуть эту версию</button>
   </div>`).join('');
 }
 
@@ -1142,6 +1203,11 @@ function renderModelState(data) {
     : '';
 
   const { limits, routes, rates } = data.config;
+  const processors = data.config.processors || {};
+  const features = {
+    ...Object.fromEntries(Object.keys(FEATURE_CONTROLS).map((id) => [id, true])),
+    ...(data.config.features || {})
+  };
   $('#minuteLimit').value = limits.requests_per_minute;
   $('#frontierLimit').value = limits.frontier_per_license;
   $('#standardLimit').value = limits.standard_per_license;
@@ -1158,6 +1224,10 @@ function renderModelState(data) {
   $('#standardReasoning').checked = routes.standard.reasoning_effort;
   $('#pdfModels').value = routes.pdf.models.join(', ');
   $('#modelRates').value = JSON.stringify(rates, null, 2);
+  $('#modelProcessors').value = JSON.stringify(processors, null, 2);
+  for (const [id, control] of Object.entries(FEATURE_CONTROLS)) {
+    $('#' + control).checked = features[id] === true;
+  }
   $('#modelChangeReason').value = '';
   renderModelHistory(data.history || []);
   updateModelDraftState();
@@ -1305,11 +1375,24 @@ function bindChrome() {
     if (state.models.current) renderModelState(state.models.current);
   });
   // Auto is the route that solves homework AND tests, so its preset is the
-  // one-click switch between live models. qwen3.7-plus is multimodal, which is
-  // why the same id goes into both the text and the image chain; qwen-vl-plus
-  // trails it as a vision-capable fallback. The VPS sends Qwen no
-  // reasoning_effort at all, but the checkbox stays on so flipping back to
-  // GLM or DeepSeek does not silently lose the passthrough.
+  // one-click switch between live models. Every Qwen preset here puts the same
+  // multimodal id into both the text and the image chain and trails it with
+  // vision-capable fallbacks only — a text-only stand-in answers an image
+  // request with HTTP 200 and a confident wrong guess instead of an error.
+  //
+  // The `reasoning_effort` checkbox governs only the GENERIC passthrough on the
+  // VPS. Models the VPS knows by name (qwen3.8-flash, older Qwen, GLM) are on
+  // their own per-model policy and ignore it, so it stays ticked: flipping this
+  // route to some other model must not silently lose the passthrough.
+  $('#autoQwen38Preset').addEventListener('click', () => {
+    $('#deepseekText').value = 'qwen3.8-flash, qwen3.7-plus';
+    $('#deepseekVision').value = 'qwen3.8-flash, qwen3.7-plus, qwen-vl-plus';
+    $('#deepseekReasoning').checked = true;
+    rememberModelRate('qwen3.8-flash', 0.15, 0.47);
+    rememberModelRate('qwen3.7-plus', 0.32, 1.28);
+    rememberModelRate('qwen-vl-plus', 0.32, 1.28);
+    updateModelDraftState();
+  });
   $('#autoQwenPreset').addEventListener('click', () => {
     $('#deepseekText').value = 'qwen3.7-plus';
     $('#deepseekVision').value = 'qwen3.7-plus, qwen-vl-plus';
@@ -1328,20 +1411,41 @@ function bindChrome() {
   $('#autoDeepseekPreset').addEventListener('click', () => {
     $('#deepseekText').value = 'deepseek-v4-flash';
     // DeepSeek V4 is text-only, so images need a multimodal stand-in.
-    $('#deepseekVision').value = 'qwen3.7-plus';
+    $('#deepseekVision').value = 'qwen3.8-flash';
     $('#deepseekReasoning').checked = true;
     rememberModelRate('deepseek-v4-flash', 0.20, 0.40);
+    rememberModelRate('qwen3.8-flash', 0.15, 0.47);
+    updateModelDraftState();
+  });
+  $('#thinkQwen38Preset').addEventListener('click', () => {
+    $('#qwenText').value = 'qwen3.8-flash, qwen3.7-plus, qwen-vl-plus, qwen-plus';
+    // Vision chain excludes text-only qwen-plus on purpose: it answers an
+    // image request with HTTP 200 and a wrong guess instead of an error.
+    $('#qwenVision').value = 'qwen3.8-flash, qwen3.7-plus, qwen-vl-plus';
+    $('#qwenReasoning').checked = true;
+    rememberModelRate('qwen3.8-flash', 0.15, 0.47);
     rememberModelRate('qwen3.7-plus', 0.32, 1.28);
+    rememberModelRate('qwen-vl-plus', 0.32, 1.28);
     updateModelDraftState();
   });
   $('#thinkQwenPreset').addEventListener('click', () => {
     $('#qwenText').value = 'qwen3.7-plus, qwen-vl-plus, qwen-plus';
-    // Vision chain excludes text-only qwen-plus on purpose: it answers an
-    // image request with HTTP 200 and a wrong guess instead of an error.
     $('#qwenVision').value = 'qwen3.7-plus, qwen-vl-plus';
     $('#qwenReasoning').checked = false;
     rememberModelRate('qwen3.7-plus', 0.32, 1.28);
     rememberModelRate('qwen-vl-plus', 0.32, 1.28);
+    updateModelDraftState();
+  });
+  // The cheap chain is now the SAME model at a lower reasoning_effort rather
+  // than a different vendor: the VPS sends qwen3.8-flash `low` when the client
+  // explicitly asked for the standard tier (the any-site path), and `xhigh`
+  // when МЭШ work spills over after the frontier allowance. GLM trails it so a
+  // Qwen-wide outage does not take the post-frontier allowance down too.
+  $('#standardQwen38Preset').addEventListener('click', () => {
+    $('#standardText').value = 'qwen3.8-flash, glm-5.3-flash';
+    $('#standardVision').value = 'qwen3.8-flash, glm-5.3-flash';
+    rememberModelRate('qwen3.8-flash', 0.15, 0.47);
+    rememberModelRate('glm-5.3-flash', 0.075, 0.25);
     updateModelDraftState();
   });
   $('#glmPreset').addEventListener('click', () => {
@@ -1384,7 +1488,7 @@ function logout() {
   showModelDisconnected();
 }
 
-async function tryToken(t, remember) {
+async function tryToken(t) {
   let probe;
   try {
     probe = await fetch(API_BASE + '/admin/stats/overview?days=1', { headers: { [TOKEN_HEADER]: t } });
@@ -1403,7 +1507,7 @@ async function tryToken(t, remember) {
   if (probe.status === 429) throw new Error('Слишком много попыток за сегодня — лимит воркера. Попробуйте завтра.');
   if (probe.status === 503) throw new Error('Сервер в режиме обслуживания или без D1 (503).');
   if (!probe.ok) throw new Error('Сервер недоступен (' + probe.status + ').');
-  saveToken(t, remember);
+  saveToken(t);
   enterApp();
 }
 
@@ -1416,11 +1520,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const err = $('#gateErr');
     err.textContent = '';
     if (!t) { err.textContent = 'Введите ключ.'; return; }
-    try { await tryToken(t, $('#rememberToken').checked); }
+    try { await tryToken(t); }
     catch (ex) { err.textContent = ex.message; }
   });
-  // auto-enter if we already have a stored token that still works
-  if (token) {
-    tryToken(token, localStorage.getItem(TOKEN_KEY) ? true : false).catch(() => { clearToken(); });
-  }
 });
