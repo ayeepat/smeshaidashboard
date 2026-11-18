@@ -1043,7 +1043,8 @@ const FEATURE_CONTROLS = {
 };
 
 function processorDefault(model) {
-  const lower = model.toLowerCase();
+  // 302.AI promo ids carry a `sale/` prefix in front of the vendor's name.
+  const lower = model.toLowerCase().replace(/^sale\//, '');
   if (lower.startsWith('qwen')) return { display_name: 'Qwen', operator: 'Alibaba Cloud', privacy_url: 'https://www.alibabacloud.com/help/en/model-studio/privacy-notice', enabled: true };
   // Child-facing Gemini use needs an explicit provider-contract review. New
   // entries therefore start disabled and cannot enter a live route by accident.
@@ -1408,13 +1409,33 @@ function bindChrome() {
     rememberModelRate('glm-5.3-flash', 0.075, 0.25);
     updateModelDraftState();
   });
-  $('#autoDeepseekPreset').addEventListener('click', () => {
-    $('#deepseekText').value = 'deepseek-v4-flash';
-    // DeepSeek V4 is text-only, so images need a multimodal stand-in.
-    $('#deepseekVision').value = 'qwen3.8-flash';
-    $('#deepseekReasoning').checked = true;
+  // DeepSeek for TEXT only (tried live 2026-11-18, see therealmesh
+  // docs/engineering/deepseek-v4-text-2026-11-18.md): about as accurate, a
+  // little faster on a typical answer, but it stalls more often, and it read
+  // images 3-6x slower than Qwen, so images stay on Qwen. The 40%-off promo id
+  // leads; when 302.AI retires it (-10026) the gateway moves on to the regular
+  // V4 id and then to Qwen. The gateway never sends DeepSeek JSON mode: it
+  // switches its reasoning off.
+  const DEEPSEEK_TEXT_CHAIN = 'sale/deepseek-v4.1-flash-1017, deepseek-v4-flash, qwen3.8-flash';
+  const rememberDeepseekRates = () => {
+    rememberModelRate('sale/deepseek-v4.1-flash-1017', 0.09, 0.36);
     rememberModelRate('deepseek-v4-flash', 0.20, 0.40);
     rememberModelRate('qwen3.8-flash', 0.15, 0.47);
+    rememberModelRate('qwen3.7-plus', 0.32, 1.28);
+    rememberModelRate('qwen-vl-plus', 0.32, 1.28);
+  };
+  $('#autoDeepseekPreset').addEventListener('click', () => {
+    $('#deepseekText').value = DEEPSEEK_TEXT_CHAIN;
+    $('#deepseekVision').value = 'qwen3.8-flash, qwen3.7-plus, qwen-vl-plus';
+    $('#deepseekReasoning').checked = true;
+    rememberDeepseekRates();
+    updateModelDraftState();
+  });
+  $('#thinkDeepseekPreset').addEventListener('click', () => {
+    $('#qwenText').value = DEEPSEEK_TEXT_CHAIN;
+    $('#qwenVision').value = 'qwen3.8-flash, qwen3.7-plus, qwen-vl-plus';
+    $('#qwenReasoning').checked = true;
+    rememberDeepseekRates();
     updateModelDraftState();
   });
   $('#thinkQwen38Preset').addEventListener('click', () => {

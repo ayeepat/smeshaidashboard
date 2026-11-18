@@ -488,7 +488,7 @@
                     <button class="btn sm" id="autoQwen38Preset" type="button">Qwen 3.8 Flash</button>
                     <button class="btn sm ghost" id="autoQwenPreset" type="button">Qwen 3.7 Plus</button>
                     <button class="btn sm ghost" id="autoGlmPreset" type="button">GLM-5.3-Flash</button>
-                    <button class="btn sm ghost" id="autoDeepseekPreset" type="button">DeepSeek V4 Flash · текст</button>
+                    <button class="btn sm ghost" id="autoDeepseekPreset" type="button">DeepSeek V4.1 Flash · текст</button>
                   </div>
                 </div>
                 <div class="model-grid two">
@@ -496,7 +496,7 @@
                   <div class="field"><label for="deepseekVision">Изображения</label><input id="deepseekVision" type="text" spellcheck="false" /></div>
                 </div>
                 <label class="check-line"><input id="deepseekReasoning" type="checkbox" /> Передавать <code>reasoning_effort</code></label>
-                <p class="route-policy">Auto решает и домашку, и тесты. Сейчас это Qwen 3.8 Flash — одна мультимодальная модель на текст и картинки. У неё есть настоящие уровни усилия, но в словаре Qwen: <code>low</code> / <code>medium</code> / <code>xhigh</code>, никакого <code>high</code>. МЭШ-работа всегда идёт на <code>xhigh</code>, как бы дёшево ни просил клиент; понизить усилие может только запрос, явно пришедший с <code>tier: standard</code>. Qwen 3.7 Plus и старше думают по умолчанию и не принимают <code>reasoning_effort</code> вообще, GLM-5.3-Flash — наоборот, всегда получает thinking + max. На запросах с картинкой у любой Qwen снимается <code>json_object</code>. Пресет DeepSeek меняет только текст; изображения остаются на мультимодальной модели, потому что DeepSeek V4 их не читает.</p>
+                <p class="route-policy">Auto решает и домашку, и тесты. Сейчас это Qwen 3.8 Flash — одна мультимодальная модель на текст и картинки. У неё есть настоящие уровни усилия, но в словаре Qwen: <code>low</code> / <code>medium</code> / <code>xhigh</code>, никакого <code>high</code>. МЭШ-работа всегда идёт на <code>medium</code> (с 13.11, ради скорости), как бы дёшево ни просил клиент; понизить усилие может только запрос, явно пришедший с <code>tier: standard</code>. Qwen 3.7 Plus и старше думают по умолчанию и не принимают <code>reasoning_effort</code> вообще, GLM-5.3-Flash — наоборот, всегда получает thinking + max. На запросах с картинкой у любой Qwen снимается <code>json_object</code>. Пресет DeepSeek меняет только текст: картинки DeepSeek читает в 3–6 раз медленнее, поэтому они остаются на Qwen. Первой идёт акционная модель <code>sale/deepseek-v4.1-flash-1017</code>; когда акция кончится, шлюз сам перейдёт на обычную <code>deepseek-v4-flash</code>, а затем на Qwen. <code>json_object</code> DeepSeek не получает никогда: с ним он перестаёт рассуждать.</p>
               </fieldset>
               <fieldset class="route-row">
                 <legend>Think <span>клиентский route: qwen</span></legend>
@@ -505,6 +505,7 @@
                   <div>
                     <button class="btn sm" id="thinkQwen38Preset" type="button">Qwen 3.8 Flash</button>
                     <button class="btn sm ghost" id="thinkQwenPreset" type="button">Qwen 3.7 Plus</button>
+                    <button class="btn sm ghost" id="thinkDeepseekPreset" type="button">DeepSeek V4.1 Flash · текст</button>
                   </div>
                 </div>
                 <div class="model-grid two">
